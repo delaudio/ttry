@@ -106,5 +106,4 @@ replay, and parallel execution are planned for later phases.
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE) once the project license file is
-added.
+Apache License 2.0. See [LICENSE](LICENSE).
