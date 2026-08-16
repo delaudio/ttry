@@ -44,15 +44,27 @@ impl Key {
         let parts: Vec<&str> = normalized.split('+').collect();
         let original_key = expression.trim().rsplit('+').next().unwrap_or(expression);
         let (modifiers, key_name) = parts.split_at(parts.len() - 1);
-        let ctrl = modifiers.contains(&"ctrl") || modifiers.contains(&"control");
-        let alt = modifiers.contains(&"alt") || modifiers.contains(&"option");
-        let shift = modifiers.contains(&"shift");
         if modifiers
             .iter()
             .any(|part| !matches!(*part, "ctrl" | "control" | "alt" | "option" | "shift"))
         {
             return Err(Error::InvalidKey(expression.into()));
         }
+        let ctrl_count = modifiers
+            .iter()
+            .filter(|part| matches!(**part, "ctrl" | "control"))
+            .count();
+        let alt_count = modifiers
+            .iter()
+            .filter(|part| matches!(**part, "alt" | "option"))
+            .count();
+        let shift_count = modifiers.iter().filter(|part| **part == "shift").count();
+        if ctrl_count > 1 || alt_count > 1 || shift_count > 1 {
+            return Err(Error::InvalidKey(expression.into()));
+        }
+        let ctrl = ctrl_count == 1;
+        let alt = alt_count == 1;
+        let shift = shift_count == 1;
         let base = match key_name[0] {
             "enter" | "return" => Key::Enter,
             "escape" | "esc" => Key::Escape,
@@ -274,5 +286,8 @@ mod tests {
             b"\x1bA"
         );
         assert!(Key::parse("hyper+x").is_err());
+        assert!(Key::parse("ctrl+control+c").is_err());
+        assert!(Key::parse("alt+option+x").is_err());
+        assert!(Key::parse("shift+shift+a").is_err());
     }
 }

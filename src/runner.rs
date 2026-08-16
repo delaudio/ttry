@@ -181,7 +181,8 @@ impl TestContext {
     ///
     /// Rust test bodies cannot be forcibly stopped safely. Long-running custom
     /// work should poll this flag and return promptly when cancellation is
-    /// requested. Registered TUI sessions are closed automatically on timeout.
+    /// requested. Registered TUI sessions are closed by the runner once the
+    /// test body returns.
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
@@ -285,7 +286,6 @@ impl Runner {
             let timeout = test.timeout.unwrap_or(self.timeout);
             let sessions = Arc::new(Mutex::new(Vec::new()));
             let cancelled = Arc::new(AtomicBool::new(false));
-            let watchdog_sessions = Arc::clone(&sessions);
             let watchdog_cancelled = Arc::clone(&cancelled);
             let (finished_sender, finished_receiver) = mpsc::sync_channel(1);
             let watchdog = thread::Builder::new()
@@ -296,11 +296,6 @@ impl Runner {
                         Err(mpsc::RecvTimeoutError::Timeout)
                     ) {
                         watchdog_cancelled.store(true, Ordering::Release);
-                        let context = TestContext {
-                            sessions: watchdog_sessions,
-                            cancelled: watchdog_cancelled,
-                        };
-                        let _ = context.cleanup();
                         true
                     } else {
                         false

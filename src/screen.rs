@@ -71,6 +71,7 @@ struct Buffer {
     saved_cursor: (u16, u16),
     style: Style,
     pending_wrap: bool,
+    last_printed: Option<usize>,
 }
 
 impl Buffer {
@@ -84,6 +85,7 @@ impl Buffer {
             saved_cursor: (0, 0),
             style: Style::default(),
             pending_wrap: false,
+            last_printed: None,
         }
     }
 
@@ -96,6 +98,7 @@ impl Buffer {
         if self.rows == 0 {
             return;
         }
+        self.last_printed = None;
         let width = self.cols as usize;
         self.cells.rotate_left(width);
         let start = self.cells.len().saturating_sub(width);
@@ -109,6 +112,7 @@ impl Buffer {
 
     fn line_feed(&mut self) {
         self.pending_wrap = false;
+        self.last_printed = None;
         if self.cursor_row + 1 >= self.rows {
             self.scroll_up();
         } else {
@@ -120,21 +124,8 @@ impl Buffer {
         let mut ch = ch;
         let mut width = UnicodeWidthChar::width(ch).unwrap_or(0);
         if width == 0 {
-            let previous = if self.pending_wrap {
-                self.index(self.cursor_col, self.cursor_row)
-            } else if self.cursor_col > 0 {
-                self.index(self.cursor_col - 1, self.cursor_row)
-            } else if self.cursor_row > 0 {
-                self.index(self.cols.saturating_sub(1), self.cursor_row - 1)
-            } else {
-                None
-            };
-            if let Some(index) = previous {
-                if self.cells[index].continuation && index > 0 {
-                    self.cells[index - 1].text.push(ch);
-                } else {
-                    self.cells[index].text.push(ch);
-                }
+            if let Some(index) = self.last_printed.filter(|index| *index < self.cells.len()) {
+                self.cells[index].text.push(ch);
                 return true;
             }
             return false;
@@ -159,6 +150,7 @@ impl Buffer {
                 style: self.style,
                 continuation: false,
             };
+            self.last_printed = Some(index);
             if width == 2 {
                 if let Some(next) = self.index(self.cursor_col + 1, self.cursor_row) {
                     self.cells[next] = Cell {
@@ -181,6 +173,9 @@ impl Buffer {
 
     fn clear_wide_glyph_at(&mut self, index: usize) {
         if self.cells[index].continuation {
+            if index.checked_sub(1) == self.last_printed {
+                self.last_printed = None;
+            }
             self.cells[index] = Cell::default();
             if index > 0 {
                 self.cells[index - 1] = Cell::default();
@@ -192,6 +187,9 @@ impl Buffer {
             && next / self.cols as usize == index / self.cols as usize
             && self.cells[next].continuation
         {
+            if self.last_printed == Some(index) {
+                self.last_printed = None;
+            }
             self.cells[index] = Cell::default();
             self.cells[next] = Cell::default();
         }
@@ -206,6 +204,12 @@ impl Buffer {
         if end < self.cells.len() && self.cells[end].continuation {
             end += 1;
         }
+        if self
+            .last_printed
+            .is_some_and(|index| (start..end).contains(&index))
+        {
+            self.last_printed = None;
+        }
         let changed = self.cells[start..end]
             .iter()
             .any(|cell| *cell != Cell::default());
@@ -219,6 +223,12 @@ impl Buffer {
         let mut replacement = Buffer::new(cols, rows);
         let copy_rows = rows.min(self.rows);
         let copy_cols = cols.min(self.cols);
+        let mapped_last_printed = self.last_printed.and_then(|index| {
+            let row = index / self.cols as usize;
+            let col = index % self.cols as usize;
+            (row < copy_rows as usize && col < copy_cols as usize)
+                .then_some(row * cols as usize + col)
+        });
         for row in 0..copy_rows {
             for col in 0..copy_cols {
                 let old = self.index(col, row).unwrap();
@@ -246,6 +256,12 @@ impl Buffer {
         replacement.cursor_row = self.cursor_row.min(rows.saturating_sub(1));
         replacement.style = self.style;
         replacement.pending_wrap = self.pending_wrap;
+        replacement.last_printed = mapped_last_printed.filter(|index| {
+            replacement
+                .cells
+                .get(*index)
+                .is_some_and(|cell| !cell.continuation && *cell != Cell::default())
+        });
         *self = replacement;
     }
 }
@@ -599,12 +615,14 @@ impl Perform for TerminalPerformer {
                     let changed = buffer.cursor_col != 0 || buffer.pending_wrap;
                     buffer.cursor_col = 0;
                     buffer.pending_wrap = false;
+                    buffer.last_printed = None;
                     changed
                 }
                 0x08 => {
                     let before = (buffer.cursor_col, buffer.pending_wrap);
                     buffer.cursor_col = buffer.cursor_col.saturating_sub(1);
                     buffer.pending_wrap = false;
+                    buffer.last_printed = None;
                     before != (buffer.cursor_col, buffer.pending_wrap)
                 }
                 b'\t' => {
@@ -612,6 +630,7 @@ impl Perform for TerminalPerformer {
                     buffer.cursor_col =
                         ((buffer.cursor_col / 8 + 1) * 8).min(buffer.cols.saturating_sub(1));
                     buffer.pending_wrap = false;
+                    buffer.last_printed = None;
                     before != (buffer.cursor_col, buffer.pending_wrap)
                 }
                 _ => false,
@@ -660,6 +679,7 @@ impl Perform for TerminalPerformer {
             }
             if action != 'm' && action != 's' {
                 buffer.pending_wrap = false;
+                buffer.last_printed = None;
             }
             let cells_changed = match action {
                 'A' => {
@@ -773,6 +793,7 @@ impl Perform for TerminalPerformer {
                 b'8' => {
                     let before = (buffer.cursor_col, buffer.cursor_row);
                     (buffer.cursor_col, buffer.cursor_row) = buffer.saved_cursor;
+                    buffer.last_printed = None;
                     before != (buffer.cursor_col, buffer.cursor_row)
                 }
                 b'D' => {
@@ -873,6 +894,24 @@ mod tests {
         assert!(screen.cell(1, 0).unwrap().continuation);
         assert_eq!(screen.cell(2, 0).unwrap().text, "e\u{301}");
         assert_eq!(screen.cell(3, 0).unwrap().text, "x");
+    }
+
+    #[test]
+    fn combining_marks_follow_the_last_printed_cell_across_wraps() {
+        let mut terminal = Terminal::new(2, 2).unwrap();
+        terminal.advance("ab\u{301}c\u{302}".as_bytes());
+        assert_eq!(terminal.screen().cell(1, 0).unwrap().text, "b\u{301}");
+        assert_eq!(terminal.screen().cell(0, 1).unwrap().text, "c\u{302}");
+
+        terminal.advance("\ra\u{303}".as_bytes());
+        assert_eq!(terminal.screen().cell(0, 1).unwrap().text, "a\u{303}");
+    }
+
+    #[test]
+    fn cursor_controls_clear_the_combining_target() {
+        let mut terminal = Terminal::new(3, 1).unwrap();
+        terminal.advance("a\r\u{301}".as_bytes());
+        assert_eq!(terminal.screen().cell(0, 0).unwrap().text, "a");
     }
 
     #[test]
