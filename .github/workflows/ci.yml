@@ -39,7 +39,7 @@ jobs:
         with:
           python-version: "3.x"
       - run: cargo build --manifest-path fixtures/ratatui/Cargo.toml
-      - run: go build -C fixtures/bubbletea -o "$RUNNER_TEMP/ttry-bubbletea"
+      - run: go -C fixtures/bubbletea build -o "$RUNNER_TEMP/ttry-bubbletea" .
       - run: python -m pip install textual
       - name: Run opt-in framework smoke tests
         env:

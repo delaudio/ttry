@@ -113,7 +113,8 @@ impl Buffer {
     }
 
     fn print(&mut self, ch: char) -> bool {
-        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        let mut ch = ch;
+        let mut width = UnicodeWidthChar::width(ch).unwrap_or(0);
         if width == 0 {
             let previous = if self.pending_wrap {
                 self.index(self.cursor_col, self.cursor_row)
@@ -133,6 +134,10 @@ impl Buffer {
                 return true;
             }
             return false;
+        }
+        if width > self.cols as usize {
+            ch = '\u{fffd}';
+            width = 1;
         }
         if self.pending_wrap
             || self.cursor_col >= self.cols
@@ -492,6 +497,8 @@ impl Terminal {
     pub fn advance(&mut self, bytes: &[u8]) {
         let screen = self.screen.clone();
         let mut performer = TerminalPerformer { screen };
+        // `vte` 0.15 consumes byte slices and retains partial UTF-8 state
+        // between calls, which also makes arbitrarily chunked PTY reads safe.
         self.parser.advance(&mut performer, bytes);
     }
 }
@@ -880,6 +887,14 @@ mod tests {
         terminal.screen().resize(2, 1).unwrap();
         assert_eq!(terminal.screen().fixed_text(), "x ");
         assert_eq!(terminal.screen().cell(1, 0).unwrap(), Cell::default());
+    }
+
+    #[test]
+    fn one_column_screen_replaces_an_unrenderable_wide_character() {
+        let mut terminal = Terminal::new(1, 1).unwrap();
+        terminal.advance("界".as_bytes());
+        assert_eq!(terminal.screen().fixed_text(), "\u{fffd}");
+        assert!(!terminal.screen().cell(0, 0).unwrap().continuation);
     }
 
     #[test]
