@@ -518,6 +518,8 @@ pub fn run_config(config: Config, options: RunOptions) -> RunReport {
     let mut runner = Runner::new(timeout).update_snapshots(options.update_snapshots);
     for configured in config.tests {
         let name = configured.name.clone();
+        // Precedence is per-test config, then CLI suite override, then the
+        // configured suite default.
         let test_timeout = configured
             .timeout_ms
             .map(Duration::from_millis)

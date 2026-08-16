@@ -261,6 +261,11 @@ impl Keyboard {
     pub(crate) fn new(writer: Arc<Mutex<Box<dyn Write + Send>>>) -> Self {
         Self { writer }
     }
+    /// Presses one key expression.
+    ///
+    /// Shifted printable characters are keyboard-layout dependent, so callers
+    /// pass the resulting character directly (`"!"`, `"A"`, or `"alt+A"`)
+    /// instead of expressions such as `"shift+1"` or `"alt+shift+a"`.
     pub fn press(&self, expression: &str) -> Result<()> {
         self.write_all(&Key::parse(expression)?.encode()?)
     }
@@ -337,6 +342,7 @@ mod tests {
         );
         assert_eq!(Key::parse("A").unwrap().encode().unwrap(), b"A");
         assert_eq!(Key::parse("shift+a").unwrap().encode().unwrap(), b"A");
+        assert_eq!(Key::parse("alt+A").unwrap().encode().unwrap(), b"\x1bA");
         assert!(matches!(
             Key::parse("alt+shift+a"),
             Err(Error::UnsupportedKey(expression, _)) if expression == "alt+shift+a"

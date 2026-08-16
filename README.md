@@ -159,8 +159,10 @@ process environment; test bodies can derive a `SnapshotOptions` value through
 
 Ctrl letters use ASCII control bytes. Alt prefixes the base encoding with ESC.
 Shift+Tab uses CSI Z. Other modified navigation keys use xterm CSI modifier
-parameters. Combinations without a portable terminal encoding fail with an
-actionable error. `type_text` preserves character order and can add a delay;
+parameters. Shifted printable characters depend on the keyboard layout, so pass
+the resulting character directly: use `!` instead of `shift+1`, `A` instead of
+`shift+a`, and `alt+A` instead of `alt+shift+a`. Combinations without a portable
+terminal encoding fail with an actionable error. `type_text` preserves character order and can add a delay;
 `paste` performs exactly one write and does not add bracketed-paste markers.
 
 ## Framework fixtures

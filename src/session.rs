@@ -396,4 +396,27 @@ mod tests {
             Err(Error::Runner(message)) if message.contains("PTY reader thread panicked")
         ));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_close_retries_reader_join_after_process_cleanup_completed() {
+        let mut options = LaunchOptions::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .size(20, 2);
+        options.shutdown_timeout = Duration::from_millis(10);
+        let session = TuiSession::launch(options).unwrap();
+        session.inner.process.close().unwrap();
+        join_reader_until(&session.inner.reader, Duration::from_secs(1)).unwrap();
+        *session.inner.reader.lock().expect("reader lock poisoned") =
+            ReaderLifecycle::Running(thread::spawn(|| {
+                thread::sleep(Duration::from_millis(80));
+            }));
+
+        assert!(matches!(
+            session.close(),
+            Err(Error::Runner(message)) if message.contains("PTY reader did not stop")
+        ));
+        thread::sleep(Duration::from_millis(90));
+        session.close().unwrap();
+    }
 }
