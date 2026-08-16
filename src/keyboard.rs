@@ -185,6 +185,12 @@ fn encode_modified(ctrl: bool, alt: bool, shift: bool, key: &Key) -> Result<Vec<
             if let (Some(ch), None) = (chars.next(), chars.next()) {
                 let upper = ch.to_ascii_uppercase();
                 if upper.is_ascii_uppercase() {
+                    if shift {
+                        return Err(Error::UnsupportedKey(
+                            format!("{key:?}"),
+                            "Ctrl+Shift letters have no distinct portable terminal encoding".into(),
+                        ));
+                    }
                     let mut bytes = vec![(upper as u8) & 0x1f];
                     if alt {
                         bytes.insert(0, 0x1b);
@@ -338,6 +344,10 @@ mod tests {
         assert!(matches!(
             Key::parse("ctrl+shift+f1"),
             Err(Error::UnsupportedKey(expression, _)) if expression == "ctrl+shift+f1"
+        ));
+        assert!(matches!(
+            Key::parse("ctrl+shift+c"),
+            Err(Error::UnsupportedKey(expression, _)) if expression == "ctrl+shift+c"
         ));
         assert!(matches!(
             Key::parse("shift+1"),

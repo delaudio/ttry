@@ -681,7 +681,7 @@ impl PtyProcess {
     #[cfg(not(unix))]
     fn observe_non_unix_state(&self, leader: &mut LeaderLifecycle) -> Result<ProcessState> {
         let mut child = self.inner.child.lock().expect("child lock poisoned");
-        match child.try_wait().map_err(Error::Io)? {
+        match child.try_wait()? {
             Some(status) => {
                 let normalized = normalize_status(status);
                 leader.record_reaped(normalized.clone());
@@ -748,8 +748,7 @@ impl PtyProcess {
             .child
             .lock()
             .expect("child lock poisoned")
-            .try_wait()
-            .map_err(Error::Io)?
+            .try_wait()?
         {
             let normalized = normalize_status(status);
             leader.record_reaped(normalized);
@@ -910,7 +909,7 @@ impl PtyProcess {
                     return Ok(true);
                 }
                 let mut child = self.inner.child.lock().expect("child lock poisoned");
-                match child.try_wait().map_err(Error::Io)? {
+                match child.try_wait()? {
                     Some(status) => {
                         leader.record_reaped(normalize_status(status));
                         true
