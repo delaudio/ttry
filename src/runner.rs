@@ -908,8 +908,9 @@ mod tests {
                 command: "/bin/sh".into(),
                 args: vec![
                     "-c".into(),
-                    "printf 'SIZE=%sx%s\\r\\n' \"$COLUMNS\" \"$LINES\"".into(),
+                    "printf 'SIZE=%sx%s\\r\\n' \"$COLUMNS\" \"$LINES\"; read _".into(),
                 ],
+                input: Some("continue\n".into()),
                 cols: Some(100),
                 rows: Some(30),
                 expect_text: Some("SIZE=100x30".into()),
@@ -1238,8 +1239,10 @@ mod tests {
     #[test]
     fn timeout_preserves_a_cooperative_late_body_error() {
         let mut runner = Runner::new(Duration::from_millis(20));
-        runner.register(TestCase::new("diagnostic", |_| {
-            std::thread::sleep(Duration::from_millis(50));
+        runner.register(TestCase::new("diagnostic", |context| {
+            while !context.is_cancelled() {
+                std::thread::yield_now();
+            }
             Err(Error::Runner("specific assertion diagnostic".into()))
         }));
         let report = runner.run(None);
