@@ -222,6 +222,13 @@ impl PtyProcess {
     pub(crate) fn mark_output_drained(&self) {
         self.inner.output_drained.store(true, Ordering::Release);
     }
+    pub(crate) fn record_event(&self, event: impl Into<String>) {
+        self.inner
+            .events
+            .lock()
+            .expect("events lock poisoned")
+            .push(event.into());
+    }
     pub fn process_id(&self) -> Option<u32> {
         self.inner
             .child

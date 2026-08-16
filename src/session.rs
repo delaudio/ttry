@@ -11,6 +11,18 @@ use crate::keyboard::Keyboard;
 use crate::process::{ProcessState, PtyOptions, PtyProcess};
 use crate::{Error, Locator, Rect, Result, Screen, Terminal};
 
+fn ingest_pty_output(reader: &mut dyn Read, terminal: &mut Terminal) -> std::io::Result<()> {
+    let mut bytes = [0_u8; 8192];
+    loop {
+        match reader.read(&mut bytes) {
+            Ok(0) => return Ok(()),
+            Ok(count) => terminal.advance(&bytes[..count]),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LaunchOptions {
     pub command: OsString,
@@ -137,12 +149,8 @@ impl TuiSession {
         thread::Builder::new()
             .name("ttry-pty-reader".into())
             .spawn(move || {
-                let mut bytes = [0_u8; 8192];
-                loop {
-                    match reader.read(&mut bytes) {
-                        Ok(0) | Err(_) => break,
-                        Ok(count) => terminal.advance(&bytes[..count]),
-                    }
+                if let Err(error) = ingest_pty_output(reader.as_mut(), &mut terminal) {
+                    thread_process.record_event(format!("PTY reader failed: {error}"));
                 }
                 thread_process.mark_output_drained();
                 let _ = thread_process.state();
@@ -217,5 +225,42 @@ impl TuiSession {
                 .screen
                 .wait_for_change(version, (deadline - now).min(Duration::from_millis(50)));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct InterruptedThenData {
+        interrupted: bool,
+        emitted: bool,
+    }
+
+    impl Read for InterruptedThenData {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if !self.interrupted {
+                self.interrupted = true;
+                return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+            }
+            if self.emitted {
+                return Ok(0);
+            }
+            self.emitted = true;
+            let bytes = b"ready";
+            buffer[..bytes.len()].copy_from_slice(bytes);
+            Ok(bytes.len())
+        }
+    }
+
+    #[test]
+    fn pty_ingestion_retries_an_interrupted_read() {
+        let mut reader = InterruptedThenData {
+            interrupted: false,
+            emitted: false,
+        };
+        let mut terminal = Terminal::new(10, 1).unwrap();
+        ingest_pty_output(&mut reader, &mut terminal).unwrap();
+        assert_eq!(terminal.screen().text(), "ready");
     }
 }
