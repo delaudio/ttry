@@ -463,13 +463,15 @@ impl Drop for ProcessInner {
             return;
         }
         let child = self.child.get_mut().expect("child lock poisoned");
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            return;
-        }
-
+        // Signal while the unreaped leader still reserves this numeric PGID.
+        // Reaping first could allow the identifier to be reused; signaling
+        // first also terminates descendants when the leader already exited.
         #[cfg(unix)]
         if let Some(process_group) = self.process_group {
             let _ = killpg(Pid::from_raw(process_group), Signal::SIGKILL);
+        }
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
         }
         let _ = child.kill();
         let deadline = Instant::now() + self.shutdown_timeout;

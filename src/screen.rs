@@ -347,7 +347,15 @@ impl Screen {
                     ) {
                         let cell = &active.cells[index];
                         if !cell.continuation {
-                            line.push_str(&cell.text);
+                            let remaining = usize::from(rect.width - relative_col);
+                            if UnicodeWidthStr::width(cell.text.as_str()) > remaining {
+                                // The region selected only the leading half of
+                                // a wide glyph. Preserve the selected column
+                                // without leaking the glyph past the boundary.
+                                line.push(' ');
+                            } else {
+                                line.push_str(&cell.text);
+                            }
                         } else if relative_col == 0 {
                             // The region clipped away the leading half of this
                             // wide glyph. Retain the selected display column.
@@ -956,6 +964,10 @@ mod tests {
         let continuation_only = terminal.screen().region(Rect::new(1, 0, 1, 1)).unwrap();
         assert_eq!(continuation_only.fixed_text(), " ");
         assert_eq!(continuation_only.text(), "");
+
+        let leading_only = terminal.screen().region(Rect::new(0, 0, 1, 1)).unwrap();
+        assert_eq!(leading_only.fixed_text(), " ");
+        assert_eq!(leading_only.text(), "");
     }
 
     #[test]
