@@ -962,7 +962,7 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
-    fn allow_running_rejects_a_nonzero_exit_observed_after_the_text_check() {
+    fn default_allow_running_grace_rejects_an_exit_observed_after_the_text_check() {
         let config = Config {
             timeout_ms: 1_000,
             tests: vec![ConfiguredTest {
@@ -981,6 +981,7 @@ mod tests {
             }],
             ..Config::default()
         };
+        assert_eq!(config.tests[0].allow_running_grace_ms, None);
         let report = run_config(config, RunOptions::default());
         assert_eq!((report.passed, report.failed), (0, 1), "{report:?}");
         assert!(matches!(
@@ -1009,31 +1010,6 @@ mod tests {
             &report.tests[0].status,
             TestStatus::Failed(message)
                 if message.contains("exit code 0") && message.contains("remain alive")
-        ));
-    }
-    #[cfg(unix)]
-    #[test]
-    fn allow_running_catches_a_crash_just_after_the_text_check() {
-        let config = Config {
-            timeout_ms: 1_000,
-            tests: vec![ConfiguredTest {
-                name: "slightly delayed crash".into(),
-                command: "/bin/sh".into(),
-                args: vec![
-                    "-c".into(),
-                    "printf 'READY\\r\\n'; sleep 0.02; exit 9".into(),
-                ],
-                expect_text: Some("READY".into()),
-                allow_running: true,
-                ..ConfiguredTest::default()
-            }],
-            ..Config::default()
-        };
-        let report = run_config(config, RunOptions::default());
-        assert_eq!((report.passed, report.failed), (0, 1), "{report:?}");
-        assert!(matches!(
-            &report.tests[0].status,
-            TestStatus::Failed(message) if message.contains("exit code 9")
         ));
     }
     #[cfg(unix)]
