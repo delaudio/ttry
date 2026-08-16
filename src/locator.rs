@@ -91,7 +91,11 @@ impl Locator {
         ) {
             return Vec::new();
         }
-        let lines = self.screen.lines(false);
+        let preserve_width = match &self.matcher {
+            TextMatcher::Literal { text, .. } => text.ends_with(' '),
+            TextMatcher::Regex(_) => true,
+        };
+        let lines = self.screen.lines(preserve_width);
         let mut found = Vec::new();
         for (row, line) in lines.iter().enumerate() {
             match &self.matcher {
@@ -196,5 +200,18 @@ mod tests {
             .bounding_box()
             .unwrap();
         assert_eq!((bounds.col, bounds.width), (2, 4));
+    }
+
+    #[test]
+    fn locators_can_match_meaningful_trailing_cells() {
+        let mut terminal = Terminal::new(5, 1).unwrap();
+        terminal.advance(b"foo");
+
+        assert!(terminal.screen().get_by_exact_text("foo  ").is_visible());
+        assert!(terminal
+            .screen()
+            .get_by_regex(r"foo  $")
+            .unwrap()
+            .is_visible());
     }
 }

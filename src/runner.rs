@@ -13,6 +13,8 @@ use crate::screen::validate_dimensions;
 use crate::session::{LaunchOptions, TuiSession};
 use crate::{Error, Result};
 
+pub const MAX_TIMEOUT_MS: u64 = 86_400_000;
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Reporter {
@@ -77,10 +79,12 @@ impl Config {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
-        if config.timeout_ms == 0 {
+        if !(1..=MAX_TIMEOUT_MS).contains(&config.timeout_ms) {
             return Err(Error::Config {
                 path: path.to_path_buf(),
-                message: "timeout_ms must be greater than zero".into(),
+                message: format!(
+                    "timeout_ms must be greater than zero and at most {MAX_TIMEOUT_MS}"
+                ),
             });
         }
         for test in &mut config.tests {
@@ -90,11 +94,14 @@ impl Config {
                     message: "every [[tests]] entry requires non-empty name and command".into(),
                 });
             }
-            if test.timeout_ms == Some(0) {
+            if test
+                .timeout_ms
+                .is_some_and(|value| !(1..=MAX_TIMEOUT_MS).contains(&value))
+            {
                 return Err(Error::Config {
                     path: path.to_path_buf(),
                     message: format!(
-                        "timeout_ms for test `{}` must be greater than zero",
+                        "timeout_ms for test `{}` must be greater than zero and at most {MAX_TIMEOUT_MS}",
                         test.name
                     ),
                 });
@@ -122,20 +129,26 @@ impl Config {
                     ),
                 });
             }
-            if test.allow_running_grace_ms == Some(0) {
+            if test
+                .allow_running_grace_ms
+                .is_some_and(|value| !(1..=MAX_TIMEOUT_MS).contains(&value))
+            {
                 return Err(Error::Config {
                     path: path.to_path_buf(),
                     message: format!(
-                        "allow_running_grace_ms for test `{}` must be greater than zero",
+                        "allow_running_grace_ms for test `{}` must be greater than zero and at most {MAX_TIMEOUT_MS}",
                         test.name
                     ),
                 });
             }
-            if test.shutdown_timeout_ms == Some(0) {
+            if test
+                .shutdown_timeout_ms
+                .is_some_and(|value| !(1..=MAX_TIMEOUT_MS).contains(&value))
+            {
                 return Err(Error::Config {
                     path: path.to_path_buf(),
                     message: format!(
-                        "shutdown_timeout_ms for test `{}` must be greater than zero",
+                        "shutdown_timeout_ms for test `{}` must be greater than zero and at most {MAX_TIMEOUT_MS}",
                         test.name
                     ),
                 });
@@ -784,6 +797,19 @@ mod tests {
         assert!(matches!(
             Config::load(file.path()),
             Err(Error::Config { .. })
+        ));
+    }
+    #[test]
+    fn excessive_configured_timeout_is_rejected() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(
+            file.path(),
+            format!("timeout_ms = {}\n", MAX_TIMEOUT_MS + 1),
+        )
+        .unwrap();
+        assert!(matches!(
+            Config::load(file.path()),
+            Err(Error::Config { message, .. }) if message.contains("at most")
         ));
     }
     #[test]

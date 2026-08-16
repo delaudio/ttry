@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use ttry::runner::{run_config, Config, Reporter, RunOptions, TestStatus};
+use ttry::runner::{run_config, Config, Reporter, RunOptions, TestStatus, MAX_TIMEOUT_MS};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -44,8 +44,10 @@ fn parse_positive_timeout(value: &str) -> Result<u64, String> {
     let timeout = value
         .parse::<u64>()
         .map_err(|_| format!("invalid timeout `{value}`; expected milliseconds"))?;
-    if timeout == 0 {
-        Err("timeout must be greater than zero".into())
+    if !(1..=MAX_TIMEOUT_MS).contains(&timeout) {
+        Err(format!(
+            "timeout must be between 1 and {MAX_TIMEOUT_MS} milliseconds"
+        ))
     } else {
         Ok(timeout)
     }
@@ -113,6 +115,11 @@ fn main() -> ExitCode {
                     if writeln!(stdout).and_then(|()| stdout.flush()).is_err() {
                         eprintln!("error: could not flush dot reporter output");
                         return ExitCode::from(2);
+                    }
+                    for result in &report.tests {
+                        if let TestStatus::Failed(error) = &result.status {
+                            eprintln!("FAIL {}\n  {}", result.name, error.replace('\n', "\n  "));
+                        }
                     }
                     // Keep stdout machine-stable for compact progress parsers.
                     eprintln!("{}", report.summary());
