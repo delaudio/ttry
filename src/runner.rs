@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 
 use crate::process::ProcessState;
+use crate::screen::validate_dimensions;
 use crate::session::{LaunchOptions, TuiSession};
 use crate::{Error, Result};
 
@@ -58,17 +59,31 @@ impl Config {
             path: path.to_path_buf(),
             message: error.to_string(),
         })?;
-        let config: Self = toml::from_str(&source).map_err(|error| Error::Config {
+        let mut config: Self = toml::from_str(&source).map_err(|error| Error::Config {
             path: path.to_path_buf(),
             message: error.to_string(),
         })?;
+        let absolute_path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|directory| directory.join(path))
+                .map_err(|error| Error::Config {
+                    path: path.to_path_buf(),
+                    message: error.to_string(),
+                })?
+        };
+        let config_directory = absolute_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
         if config.timeout_ms == 0 {
             return Err(Error::Config {
                 path: path.to_path_buf(),
                 message: "timeout_ms must be greater than zero".into(),
             });
         }
-        for test in &config.tests {
+        for test in &mut config.tests {
             if test.name.trim().is_empty() || test.command.trim().is_empty() {
                 return Err(Error::Config {
                     path: path.to_path_buf(),
@@ -84,13 +99,12 @@ impl Config {
                     ),
                 });
             }
-            if test.cols == Some(0) || test.rows == Some(0) {
+            if let Err(error) =
+                validate_dimensions(test.cols.unwrap_or(80), test.rows.unwrap_or(24))
+            {
                 return Err(Error::Config {
                     path: path.to_path_buf(),
-                    message: format!(
-                        "cols and rows for test `{}` must be greater than zero",
-                        test.name
-                    ),
+                    message: format!("invalid dimensions for test `{}`: {error}", test.name),
                 });
             }
             if test.expect_text.as_deref() == Some("") {
@@ -108,6 +122,11 @@ impl Config {
                     ),
                 });
             }
+            test.cwd = Some(match test.cwd.take() {
+                Some(cwd) if cwd.is_absolute() => cwd,
+                Some(cwd) => config_directory.join(cwd),
+                None => config_directory.clone(),
+            });
         }
         Ok(config)
     }
@@ -156,6 +175,7 @@ pub struct TestResult {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RunReport {
     pub reporter: Reporter,
+    pub selected: usize,
     pub passed: usize,
     pub failed: usize,
     pub skipped: usize,
@@ -164,7 +184,7 @@ pub struct RunReport {
 
 impl RunReport {
     pub fn success(&self) -> bool {
-        self.failed == 0
+        self.selected > 0 && self.failed == 0
     }
     pub fn summary(&self) -> String {
         format!(
@@ -332,6 +352,9 @@ impl Runner {
         for (test_index, test) in self.tests.into_iter().enumerate() {
             let name = test.full_name();
             let filtered = grep.is_some_and(|pattern| !name.contains(pattern));
+            if !test.skip && !filtered && (!focused || test.focus) {
+                report.selected += 1;
+            }
             if unsafe_to_continue || test.skip || filtered || (focused && !test.focus) {
                 report.skipped += 1;
                 report.tests.push(TestResult {
@@ -580,6 +603,16 @@ mod tests {
         assert_eq!(report.tests[1].name, "group › focused");
     }
     #[test]
+    fn empty_or_unmatched_test_selection_is_not_successful() {
+        assert!(!Runner::new(Duration::from_secs(1)).run(None).success());
+
+        let mut runner = Runner::new(Duration::from_secs(1));
+        runner.register(TestCase::new("present", |_| Ok(())));
+        let report = runner.run(Some("missing"));
+        assert_eq!(report.selected, 0);
+        assert!(!report.success());
+    }
+    #[test]
     fn invalid_config_is_readable() {
         let file = tempfile::NamedTempFile::new().unwrap();
         fs::write(file.path(), "timeout_ms = 0\nunknown = true").unwrap();
@@ -655,6 +688,31 @@ mod tests {
         .unwrap();
         let config = Config::load(file.path()).unwrap();
         assert!(!config.tests[0].allow_running);
+    }
+    #[test]
+    fn loaded_config_resolves_working_directories_from_its_own_location() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_directory = directory.path().join("suite");
+        fs::create_dir(&config_directory).unwrap();
+        let path = config_directory.join("ttry.toml");
+        fs::write(
+            &path,
+            "[[tests]]\nname = 'default cwd'\ncommand = 'true'\n\
+             [[tests]]\nname = 'relative cwd'\ncommand = './tool'\ncwd = 'fixtures'\n",
+        )
+        .unwrap();
+
+        let config = Config::load(path).unwrap();
+
+        assert_eq!(
+            config.tests[0].cwd.as_deref(),
+            Some(config_directory.as_path())
+        );
+        let relative_directory = config_directory.join("fixtures");
+        assert_eq!(
+            config.tests[1].cwd.as_deref(),
+            Some(relative_directory.as_path())
+        );
     }
     #[test]
     fn zero_configured_dimensions_are_rejected() {

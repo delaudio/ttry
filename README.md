@@ -125,7 +125,9 @@ ttry test \
 ```
 
 Invalid TOML, unknown fields, zero timeouts, empty names/commands, and unknown
-reporters produce readable errors. Any failed test makes the CLI exit nonzero;
+reporters produce readable errors. Relative commands and `cwd` values are
+resolved from the configuration file's directory. A run with no selected tests
+or any failed test makes the CLI exit nonzero;
 the final report always contains deterministic pass/fail/skip counts.
 
 Rust-authored suites can use `Runner`, `TestCase`, and `TestContext::tui` to
@@ -184,6 +186,8 @@ session handle also performs bounded termination and reaps the child.
 `startup_timeout` rejects PTY creation that completes after its budget; spawn
 remains synchronous so a timeout cannot orphan a launcher thread.
 `shutdown_timeout` bounds the cleanup sequence. Both must be greater than zero.
+Terminal dimensions must also be nonzero and may allocate at most 1,000,000
+cells per screen buffer.
 
 ## Security
 

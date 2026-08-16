@@ -17,6 +17,7 @@ use nix::sys::signal::{killpg, Signal};
 use nix::unistd::Pid;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
+use crate::screen::validate_dimensions;
 use crate::{Error, Result};
 
 #[cfg(unix)]
@@ -501,12 +502,7 @@ impl std::fmt::Debug for PtyProcess {
 
 impl PtyProcess {
     pub fn spawn(options: PtyOptions) -> Result<(Self, Box<dyn Read + Send>)> {
-        if options.cols == 0 || options.rows == 0 {
-            return Err(Error::InvalidDimensions {
-                cols: options.cols,
-                rows: options.rows,
-            });
-        }
+        validate_dimensions(options.cols, options.rows)?;
         if options.shutdown_timeout.is_zero() {
             return Err(Error::InvalidTimeout {
                 field: "shutdown_timeout",
@@ -798,9 +794,7 @@ impl PtyProcess {
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        if cols == 0 || rows == 0 {
-            return Err(Error::InvalidDimensions { cols, rows });
-        }
+        validate_dimensions(cols, rows)?;
         self.inner
             .master
             .lock()
@@ -1133,6 +1127,18 @@ mod option_tests {
             Err(Error::InvalidTimeout {
                 field: "shutdown_timeout"
             })
+        ));
+    }
+
+    #[test]
+    fn excessive_dimensions_are_rejected_before_spawning() {
+        let mut options = PtyOptions::new("command-must-not-be-spawned");
+        options.cols = u16::MAX;
+        options.rows = u16::MAX;
+
+        assert!(matches!(
+            PtyProcess::spawn(options),
+            Err(Error::ScreenTooLarge { .. })
         ));
     }
 }

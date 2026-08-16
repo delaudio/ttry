@@ -32,6 +32,6 @@ pub use expect::{expect, Expect, ExpectOptions, ProcessExpect, ScreenExpect};
 pub use keyboard::{Key, Keyboard};
 pub use locator::{BoundingBox, Locator, TextMatcher};
 pub use process::{ExitStatus, ProcessState, PtyOptions};
-pub use screen::{Cell, Color, Rect, Screen, Style, Terminal};
+pub use screen::{Cell, Color, Rect, Screen, Style, Terminal, MAX_SCREEN_CELLS};
 pub use session::{launch, LaunchOptions, TuiSession};
 pub use snapshot::{SnapshotOptions, SnapshotResult, SnapshotStore};

@@ -6,6 +6,14 @@ use std::time::Duration;
 pub enum Error {
     #[error("invalid terminal dimensions {cols}x{rows}; both values must be greater than zero")]
     InvalidDimensions { cols: u16, rows: u16 },
+    #[error(
+        "terminal dimensions {cols}x{rows} exceed the maximum screen area of {max_cells} cells"
+    )]
+    ScreenTooLarge {
+        cols: u16,
+        rows: u16,
+        max_cells: usize,
+    },
     #[error("invalid {field}; timeout must be greater than zero")]
     InvalidTimeout { field: &'static str },
     #[error("invalid key expression `{0}`")]

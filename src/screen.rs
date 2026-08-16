@@ -6,6 +6,24 @@ use vte::{Params, Perform};
 
 use crate::{Error, Result};
 
+/// Maximum number of cells allocated for one terminal screen buffer.
+pub const MAX_SCREEN_CELLS: usize = 1_000_000;
+
+pub(crate) fn validate_dimensions(cols: u16, rows: u16) -> Result<()> {
+    if cols == 0 || rows == 0 {
+        return Err(Error::InvalidDimensions { cols, rows });
+    }
+    let cells = usize::from(cols) * usize::from(rows);
+    if cells > MAX_SCREEN_CELLS {
+        return Err(Error::ScreenTooLarge {
+            cols,
+            rows,
+            max_cells: MAX_SCREEN_CELLS,
+        });
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Color {
     #[default]
@@ -303,9 +321,7 @@ pub struct Screen {
 
 impl Screen {
     pub fn new(cols: u16, rows: u16) -> Result<Self> {
-        if cols == 0 || rows == 0 {
-            return Err(Error::InvalidDimensions { cols, rows });
-        }
+        validate_dimensions(cols, rows)?;
         Ok(Self {
             inner: Arc::new(SharedScreen {
                 state: RwLock::new(ScreenState {
@@ -465,9 +481,7 @@ impl Screen {
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        if cols == 0 || rows == 0 {
-            return Err(Error::InvalidDimensions { cols, rows });
-        }
+        validate_dimensions(cols, rows)?;
         let mut state = self.inner.state.write().expect("screen lock poisoned");
         if state.primary.cols == cols && state.primary.rows == rows {
             return Ok(());
@@ -849,6 +863,22 @@ mod tests {
         assert_eq!(screen.fixed_text(), "   \n   ");
         assert_eq!(screen.cell(0, 0).unwrap(), Cell::default());
         assert!(screen.cell(3, 0).is_none());
+    }
+
+    #[test]
+    fn excessive_screen_area_is_rejected_before_allocation() {
+        assert!(matches!(
+            Screen::new(u16::MAX, u16::MAX),
+            Err(Error::ScreenTooLarge {
+                max_cells: MAX_SCREEN_CELLS,
+                ..
+            })
+        ));
+        let screen = Screen::new(80, 24).unwrap();
+        assert!(matches!(
+            screen.resize(u16::MAX, u16::MAX),
+            Err(Error::ScreenTooLarge { .. })
+        ));
     }
 
     #[test]
