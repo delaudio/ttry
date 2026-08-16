@@ -327,6 +327,8 @@ mod tests {
     #[test]
     fn modifier_encodings() {
         assert_eq!(Key::parse("ctrl+c").unwrap().encode().unwrap(), vec![3]);
+        assert_eq!(Key::parse(" ctrl+c").unwrap().encode().unwrap(), vec![3]);
+        assert_eq!(Key::parse("ctrl+c ").unwrap().encode().unwrap(), vec![3]);
         assert_eq!(Key::parse("alt+x").unwrap().encode().unwrap(), b"\x1bx");
         assert_eq!(
             Key::parse("alt+up").unwrap().encode().unwrap(),

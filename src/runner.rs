@@ -376,7 +376,7 @@ impl Runner {
         for (test_index, test) in self.tests.into_iter().enumerate() {
             let name = test.full_name();
             let filtered = grep.is_some_and(|pattern| !name.contains(pattern));
-            if !test.skip && !filtered && (!focused || test.focus) {
+            if !filtered && (!focused || test.focus) {
                 report.selected += 1;
             }
             if unsafe_to_continue || test.skip || filtered || (focused && !test.focus) {
@@ -654,6 +654,16 @@ mod tests {
         let report = runner.run(Some("missing"));
         assert_eq!(report.selected, 0);
         assert!(!report.success());
+    }
+    #[test]
+    fn an_explicitly_skipped_only_suite_is_successful() {
+        let mut runner = Runner::new(Duration::from_secs(1));
+        runner.register(TestCase::new("not available here", |_| Ok(())).skip());
+
+        let report = runner.run(None);
+
+        assert_eq!((report.selected, report.skipped, report.failed), (1, 1, 0));
+        assert!(report.success());
     }
     #[test]
     fn invalid_config_is_readable() {

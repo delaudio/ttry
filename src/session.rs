@@ -203,6 +203,10 @@ impl TuiSession {
         }
         let startup_timeout = options.startup_timeout;
         let shutdown_timeout = options.shutdown_timeout;
+        // Construct every fallible in-memory component before spawning the
+        // external process. Later error paths are additionally protected by
+        // PtyProcess's bounded Drop cleanup.
+        let mut terminal = Terminal::new(options.cols, options.rows)?;
         let mut pty_options = PtyOptions::new(options.command);
         pty_options.args = options.args;
         pty_options.cwd = options.cwd;
@@ -223,7 +227,6 @@ impl TuiSession {
             });
         }
         let (process, mut reader) = spawned?;
-        let mut terminal = Terminal::new(options.cols, options.rows)?;
         let screen = terminal.screen();
         let thread_screen = screen.clone();
         let thread_process = process.clone();

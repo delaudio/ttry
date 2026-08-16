@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -91,17 +92,28 @@ fn main() -> ExitCode {
                     println!("{}", report.summary());
                 }
                 Reporter::Dot => {
+                    let stdout = std::io::stdout();
+                    let mut stdout = stdout.lock();
                     for result in &report.tests {
-                        print!(
+                        if write!(
+                            stdout,
                             "{}",
                             match &result.status {
                                 TestStatus::Passed => '.',
                                 TestStatus::Skipped => 's',
                                 TestStatus::Failed(_) => 'F',
                             }
-                        );
+                        )
+                        .is_err()
+                        {
+                            eprintln!("error: could not write dot reporter output");
+                            return ExitCode::from(2);
+                        }
                     }
-                    println!();
+                    if writeln!(stdout).and_then(|()| stdout.flush()).is_err() {
+                        eprintln!("error: could not flush dot reporter output");
+                        return ExitCode::from(2);
+                    }
                     // Keep stdout machine-stable for compact progress parsers.
                     eprintln!("{}", report.summary());
                 }
