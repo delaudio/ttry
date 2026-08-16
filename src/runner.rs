@@ -583,7 +583,16 @@ pub fn run_config(config: Config, options: RunOptions) -> RunReport {
                 session.keyboard().paste(&input)?;
             }
             if let Some(expected) = configured.expect_text {
-                session.wait_for_text(&expected, remaining()?)?;
+                if let Err(error) = session.wait_for_text(&expected, remaining()?) {
+                    return match error {
+                        Error::ProcessExited(message) if configured.allow_running => {
+                            Err(Error::ProcessExited(format!(
+                                "{message}; allow_running requires the process to remain alive"
+                            )))
+                        }
+                        error => Err(error),
+                    };
+                }
             }
             if let Some(code) = configured.expect_exit_code {
                 expect_configured_exit(
