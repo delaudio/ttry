@@ -478,6 +478,17 @@ impl LeaderLifecycle {
         // observation could only establish that the process had exited.
         *self = Self::Reaped(status);
     }
+
+    fn record_reaped_unknown_if_unavailable(&mut self) -> bool {
+        if !matches!(self, Self::ExitedUnreapedStatusUnavailable) {
+            return false;
+        }
+        self.record_reaped(ExitStatus {
+            code: None,
+            signal: None,
+        });
+        true
+    }
 }
 
 struct ProcessInner {
@@ -753,11 +764,21 @@ impl PtyProcess {
                 let mut child = self.inner.child.lock().expect("child lock poisoned");
                 try_wait_child(child.as_mut())?
             };
-            if let Some(status) = status {
-                let normalized = normalize_status(status);
-                leader.record_reaped(normalized);
-                self.inner.cleanup_complete.store(true, Ordering::Release);
-                self.record_event("process reaped after terminal state observation");
+            match status {
+                Some(status) => {
+                    leader.record_reaped(normalize_status(status));
+                    self.inner.cleanup_complete.store(true, Ordering::Release);
+                    self.record_event("process reaped after terminal state observation");
+                }
+                None if leader.record_reaped_unknown_if_unavailable() => {
+                    // An authoritative group scan has established that
+                    // nothing remains alive. A missing wait result cannot
+                    // become more precise later and must not leave cleanup
+                    // retrying an already-finished leader forever.
+                    self.inner.cleanup_complete.store(true, Ordering::Release);
+                    self.record_event("process cleanup finalized with unavailable exit status");
+                }
+                None => {}
             }
         }
         Ok(())
@@ -1242,5 +1263,26 @@ mod tests {
             lifecycle.public_state().unwrap(),
             Some(ProcessState::Exited(status))
         );
+    }
+
+    #[test]
+    fn unavailable_exit_becomes_terminal_when_no_wait_status_remains() {
+        let mut lifecycle = LeaderLifecycle::ExitedUnreapedStatusUnavailable;
+
+        assert!(lifecycle.record_reaped_unknown_if_unavailable());
+        assert!(matches!(
+            lifecycle,
+            LeaderLifecycle::Reaped(ExitStatus {
+                code: None,
+                signal: None
+            })
+        ));
+
+        let mut known = LeaderLifecycle::ExitedUnreaped(ExitStatus {
+            code: Some(0),
+            signal: None,
+        });
+        assert!(!known.record_reaped_unknown_if_unavailable());
+        assert!(matches!(known, LeaderLifecycle::ExitedUnreaped(_)));
     }
 }

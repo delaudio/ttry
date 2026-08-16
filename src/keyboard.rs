@@ -244,6 +244,16 @@ fn encode_modified(ctrl: bool, alt: bool, shift: bool, key: &Key) -> Result<Vec<
         let modifier = 1 + shift as u8 + (alt as u8 * 2) + (ctrl as u8 * 4);
         return Ok(format!("\x1b[1;{modifier}{code}").into_bytes());
     }
+    let tilde_navigation_code = match key {
+        Key::Delete => Some(3),
+        Key::PageUp => Some(5),
+        Key::PageDown => Some(6),
+        _ => None,
+    };
+    if let Some(code) = tilde_navigation_code {
+        let modifier = 1 + shift as u8 + (alt as u8 * 2) + (ctrl as u8 * 4);
+        return Ok(format!("\x1b[{code};{modifier}~").into_bytes());
+    }
     if alt && !ctrl && !shift {
         let mut bytes = vec![0x1b];
         bytes.extend(key.encode()?);
@@ -349,6 +359,18 @@ mod tests {
         assert_eq!(
             Key::parse("alt+home").unwrap().encode().unwrap(),
             b"\x1b[1;3H"
+        );
+        assert_eq!(
+            Key::parse("shift+delete").unwrap().encode().unwrap(),
+            b"\x1b[3;2~"
+        );
+        assert_eq!(
+            Key::parse("ctrl+pageup").unwrap().encode().unwrap(),
+            b"\x1b[5;5~"
+        );
+        assert_eq!(
+            Key::parse("alt+pagedown").unwrap().encode().unwrap(),
+            b"\x1b[6;3~"
         );
         assert_eq!(
             Key::parse("shift+tab").unwrap().encode().unwrap(),
