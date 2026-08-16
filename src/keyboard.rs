@@ -1,0 +1,267 @@
+use std::io::Write;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+use crate::{Error, Result};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Key {
+    Text(String),
+    Enter,
+    Escape,
+    Tab,
+    Backspace,
+    Delete,
+    ArrowUp,
+    ArrowDown,
+    ArrowLeft,
+    ArrowRight,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Function(u8),
+    Modified {
+        ctrl: bool,
+        alt: bool,
+        shift: bool,
+        key: Box<Key>,
+    },
+}
+
+impl Key {
+    pub fn parse(expression: &str) -> Result<Self> {
+        if expression.is_empty() {
+            return Err(Error::InvalidKey(expression.into()));
+        }
+        let normalized = expression.trim().to_lowercase();
+        let parts: Vec<&str> = normalized.split('+').collect();
+        let original_key = expression.trim().rsplit('+').next().unwrap_or(expression);
+        let (modifiers, key_name) = parts.split_at(parts.len() - 1);
+        let ctrl = modifiers.contains(&"ctrl") || modifiers.contains(&"control");
+        let alt = modifiers.contains(&"alt") || modifiers.contains(&"option");
+        let shift = modifiers.contains(&"shift");
+        if modifiers
+            .iter()
+            .any(|part| !matches!(*part, "ctrl" | "control" | "alt" | "option" | "shift"))
+        {
+            return Err(Error::InvalidKey(expression.into()));
+        }
+        let base = match key_name[0] {
+            "enter" | "return" => Key::Enter,
+            "escape" | "esc" => Key::Escape,
+            "tab" => Key::Tab,
+            "backspace" => Key::Backspace,
+            "delete" | "del" => Key::Delete,
+            "arrowup" | "up" => Key::ArrowUp,
+            "arrowdown" | "down" => Key::ArrowDown,
+            "arrowleft" | "left" => Key::ArrowLeft,
+            "arrowright" | "right" => Key::ArrowRight,
+            "home" => Key::Home,
+            "end" => Key::End,
+            "pageup" | "pgup" => Key::PageUp,
+            "pagedown" | "pgdn" => Key::PageDown,
+            name if name.starts_with('f') && name[1..].parse::<u8>().is_ok() => {
+                let number = name[1..].parse::<u8>().unwrap();
+                if !(1..=12).contains(&number) {
+                    return Err(Error::UnsupportedKey(
+                        expression.into(),
+                        "only F1 through F12 are supported".into(),
+                    ));
+                }
+                Key::Function(number)
+            }
+            name if name.chars().count() == 1 => Key::Text(original_key.into()),
+            _ if parts.len() == 1 => Key::Text(expression.into()),
+            _ => return Err(Error::InvalidKey(expression.into())),
+        };
+        if ctrl || alt || shift {
+            Ok(Key::Modified {
+                ctrl,
+                alt,
+                shift,
+                key: Box::new(base),
+            })
+        } else {
+            Ok(base)
+        }
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        match self {
+            Key::Text(text) => Ok(text.as_bytes().to_vec()),
+            Key::Enter => Ok(vec![b'\r']),
+            Key::Escape => Ok(vec![0x1b]),
+            Key::Tab => Ok(vec![b'\t']),
+            Key::Backspace => Ok(vec![0x7f]),
+            Key::Delete => Ok(b"\x1b[3~".to_vec()),
+            Key::ArrowUp => Ok(b"\x1b[A".to_vec()),
+            Key::ArrowDown => Ok(b"\x1b[B".to_vec()),
+            Key::ArrowRight => Ok(b"\x1b[C".to_vec()),
+            Key::ArrowLeft => Ok(b"\x1b[D".to_vec()),
+            Key::Home => Ok(b"\x1b[H".to_vec()),
+            Key::End => Ok(b"\x1b[F".to_vec()),
+            Key::PageUp => Ok(b"\x1b[5~".to_vec()),
+            Key::PageDown => Ok(b"\x1b[6~".to_vec()),
+            Key::Function(number) => {
+                let sequence = match number {
+                    1 => "\x1bOP",
+                    2 => "\x1bOQ",
+                    3 => "\x1bOR",
+                    4 => "\x1bOS",
+                    5 => "\x1b[15~",
+                    6 => "\x1b[17~",
+                    7 => "\x1b[18~",
+                    8 => "\x1b[19~",
+                    9 => "\x1b[20~",
+                    10 => "\x1b[21~",
+                    11 => "\x1b[23~",
+                    12 => "\x1b[24~",
+                    _ => {
+                        return Err(Error::UnsupportedKey(
+                            format!("F{number}"),
+                            "only F1 through F12 are supported".into(),
+                        ))
+                    }
+                };
+                Ok(sequence.as_bytes().to_vec())
+            }
+            Key::Modified {
+                ctrl,
+                alt,
+                shift,
+                key,
+            } => encode_modified(*ctrl, *alt, *shift, key),
+        }
+    }
+}
+
+fn encode_modified(ctrl: bool, alt: bool, shift: bool, key: &Key) -> Result<Vec<u8>> {
+    if shift && matches!(key, Key::Tab) && !ctrl && !alt {
+        return Ok(b"\x1b[Z".to_vec());
+    }
+    if ctrl {
+        if let Key::Text(text) = key {
+            let mut chars = text.chars();
+            if let (Some(ch), None) = (chars.next(), chars.next()) {
+                let upper = ch.to_ascii_uppercase();
+                if upper.is_ascii_uppercase() {
+                    let mut bytes = vec![(upper as u8) & 0x1f];
+                    if alt {
+                        bytes.insert(0, 0x1b);
+                    }
+                    return Ok(bytes);
+                }
+            }
+        }
+    }
+    if !ctrl && shift {
+        if let Key::Text(text) = key {
+            let mut chars = text.chars();
+            if let (Some(ch), None) = (chars.next(), chars.next()) {
+                let mut bytes = ch.to_uppercase().to_string().into_bytes();
+                if alt {
+                    bytes.insert(0, 0x1b);
+                }
+                return Ok(bytes);
+            }
+        }
+    }
+    if alt && !ctrl && !shift {
+        let mut bytes = vec![0x1b];
+        bytes.extend(key.encode()?);
+        return Ok(bytes);
+    }
+    let code = match key {
+        Key::ArrowUp => 'A',
+        Key::ArrowDown => 'B',
+        Key::ArrowRight => 'C',
+        Key::ArrowLeft => 'D',
+        Key::Home => 'H',
+        Key::End => 'F',
+        _ => {
+            return Err(Error::UnsupportedKey(
+                format!("{key:?}"),
+                "this modifier combination has no portable terminal encoding".into(),
+            ))
+        }
+    };
+    let modifier = 1 + shift as u8 + (alt as u8 * 2) + (ctrl as u8 * 4);
+    Ok(format!("\x1b[1;{modifier}{code}").into_bytes())
+}
+
+#[derive(Clone)]
+pub struct Keyboard {
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+}
+
+impl std::fmt::Debug for Keyboard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Keyboard").finish_non_exhaustive()
+    }
+}
+
+impl Keyboard {
+    pub(crate) fn new(writer: Arc<Mutex<Box<dyn Write + Send>>>) -> Self {
+        Self { writer }
+    }
+    pub fn press(&self, expression: &str) -> Result<()> {
+        self.write_all(&Key::parse(expression)?.encode()?)
+    }
+    pub fn paste(&self, text: &str) -> Result<()> {
+        self.write_all(text.as_bytes())
+    }
+    pub fn type_text(&self, text: &str, delay: Option<Duration>) -> Result<()> {
+        for ch in text.chars() {
+            self.write_all(ch.to_string().as_bytes())?;
+            if let Some(delay) = delay {
+                if !delay.is_zero() {
+                    thread::sleep(delay);
+                }
+            }
+        }
+        Ok(())
+    }
+    fn write_all(&self, bytes: &[u8]) -> Result<()> {
+        let mut writer = self.writer.lock().expect("keyboard lock poisoned");
+        writer.write_all(bytes)?;
+        writer.flush()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn basic_and_navigation_encodings() {
+        let cases = [
+            ("a", b"a".as_slice()),
+            ("enter", b"\r"),
+            ("escape", b"\x1b"),
+            ("delete", b"\x1b[3~"),
+            ("up", b"\x1b[A"),
+            ("f12", b"\x1b[24~"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(Key::parse(input).unwrap().encode().unwrap(), expected);
+        }
+    }
+    #[test]
+    fn modifier_encodings() {
+        assert_eq!(Key::parse("ctrl+c").unwrap().encode().unwrap(), vec![3]);
+        assert_eq!(Key::parse("alt+x").unwrap().encode().unwrap(), b"\x1bx");
+        assert_eq!(
+            Key::parse("shift+tab").unwrap().encode().unwrap(),
+            b"\x1b[Z"
+        );
+        assert_eq!(Key::parse("A").unwrap().encode().unwrap(), b"A");
+        assert_eq!(Key::parse("shift+a").unwrap().encode().unwrap(), b"A");
+        assert_eq!(
+            Key::parse("alt+shift+a").unwrap().encode().unwrap(),
+            b"\x1bA"
+        );
+        assert!(Key::parse("hyper+x").is_err());
+    }
+}
