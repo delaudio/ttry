@@ -42,7 +42,7 @@ jobs:
         with:
           python-version: "3.x"
       - run: cargo build --locked --manifest-path fixtures/ratatui/Cargo.toml
-      - run: gofmt -w fixtures/bubbletea && git diff --exit-code -- fixtures/bubbletea
+      - run: gofmt -w fixtures/bubbletea/*.go && git diff --exit-code -- fixtures/bubbletea/*.go
       - run: go -C fixtures/bubbletea build -o "$RUNNER_TEMP/ttry-bubbletea" .
       - run: python -m pip install -r fixtures/textual/requirements.txt
       - name: Run opt-in framework smoke tests

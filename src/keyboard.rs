@@ -35,6 +35,11 @@ impl Key {
         if expression.is_empty() {
             return Err(Error::InvalidKey(expression.into()));
         }
+        match expression {
+            "\t" => return Ok(Key::Tab),
+            "\n" | "\r" => return Ok(Key::Enter),
+            _ => {}
+        }
         if expression != " " && expression.trim().is_empty() {
             return Err(Error::InvalidKey(expression.into()));
         }
@@ -284,6 +289,9 @@ mod tests {
     fn plus_and_space_are_printable_keys() {
         assert_eq!(Key::parse("+").unwrap().encode().unwrap(), b"+");
         assert_eq!(Key::parse(" ").unwrap().encode().unwrap(), b" ");
+        assert_eq!(Key::parse("\t").unwrap().encode().unwrap(), b"\t");
+        assert_eq!(Key::parse("\n").unwrap().encode().unwrap(), b"\r");
+        assert_eq!(Key::parse("\r").unwrap().encode().unwrap(), b"\r");
         assert!(Key::parse("hello").is_err());
         assert!(Key::parse("  ").is_err());
         assert!(Key::parse("\t ").is_err());

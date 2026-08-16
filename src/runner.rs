@@ -12,7 +12,7 @@ use crate::process::ProcessState;
 use crate::session::{LaunchOptions, TuiSession};
 use crate::{Error, Result};
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Reporter {
     #[default]

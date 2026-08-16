@@ -66,7 +66,7 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            let selected_reporter = reporter.unwrap_or(config.reporter);
+            let selected_reporter = reporter.unwrap_or_else(|| config.reporter.clone());
             let report = run_config(
                 config,
                 RunOptions {
