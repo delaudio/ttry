@@ -104,6 +104,10 @@ impl Buffer {
 
     fn newline(&mut self) {
         self.cursor_col = 0;
+        self.line_feed();
+    }
+
+    fn line_feed(&mut self) {
         self.pending_wrap = false;
         if self.cursor_row + 1 >= self.rows {
             self.scroll_up();
@@ -543,10 +547,12 @@ impl TerminalPerformer {
                 }
                 38 | 48 if values.get(index + 1) == Some(&5) => {
                     if let Some(color) = values.get(index + 2) {
-                        if values[index] == 38 {
-                            buffer.style.foreground = Color::Indexed(*color as u8);
-                        } else {
-                            buffer.style.background = Color::Indexed(*color as u8);
+                        if let Ok(color) = u8::try_from(*color) {
+                            if values[index] == 38 {
+                                buffer.style.foreground = Color::Indexed(color);
+                            } else {
+                                buffer.style.background = Color::Indexed(color);
+                            }
                         }
                         index += 2;
                     }
@@ -557,11 +563,15 @@ impl TerminalPerformer {
                         values.get(index + 3),
                         values.get(index + 4),
                     ) {
-                        let color = Color::Rgb(*r as u8, *g as u8, *b as u8);
-                        if values[index] == 38 {
-                            buffer.style.foreground = color;
-                        } else {
-                            buffer.style.background = color;
+                        if let (Ok(r), Ok(g), Ok(b)) =
+                            (u8::try_from(*r), u8::try_from(*g), u8::try_from(*b))
+                        {
+                            let color = Color::Rgb(r, g, b);
+                            if values[index] == 38 {
+                                buffer.style.foreground = color;
+                            } else {
+                                buffer.style.background = color;
+                            }
                         }
                         index += 4;
                     }
@@ -582,7 +592,7 @@ impl Perform for TerminalPerformer {
             let buffer = state.active_mut();
             match byte {
                 b'\n' | 0x0b | 0x0c => {
-                    buffer.newline();
+                    buffer.line_feed();
                     true
                 }
                 b'\r' => {
@@ -765,7 +775,11 @@ impl Perform for TerminalPerformer {
                     (buffer.cursor_col, buffer.cursor_row) = buffer.saved_cursor;
                     before != (buffer.cursor_col, buffer.cursor_row)
                 }
-                b'D' | b'E' => {
+                b'D' => {
+                    buffer.line_feed();
+                    true
+                }
+                b'E' => {
                     buffer.newline();
                     true
                 }
@@ -819,6 +833,35 @@ mod tests {
         assert!(terminal.screen().cell(0, 0).unwrap().style.bold);
         terminal.advance(b"\x1b[2Jx\x1b[?1049l");
         assert!(terminal.screen().text().starts_with("primary"));
+    }
+
+    #[test]
+    fn bare_line_feed_preserves_the_cursor_column() {
+        let mut terminal = Terminal::new(6, 2).unwrap();
+        terminal.advance(b"ab\ncd");
+        assert_eq!(terminal.screen().fixed_text(), "ab    \n  cd  ");
+        terminal.advance(b"\rX");
+        assert_eq!(terminal.screen().fixed_text(), "ab    \nX cd  ");
+    }
+
+    #[test]
+    fn malformed_extended_colors_are_ignored_without_wrapping() {
+        let mut terminal = Terminal::new(4, 1).unwrap();
+        terminal.advance(b"\x1b[38;5;999mX");
+        assert_eq!(
+            terminal.screen().cell(0, 0).unwrap().style.foreground,
+            Color::Default
+        );
+        terminal.advance(b"\x1b[38;2;300;1;2mY");
+        assert_eq!(
+            terminal.screen().cell(1, 0).unwrap().style.foreground,
+            Color::Default
+        );
+        terminal.advance(b"\x1b[38;5;255mZ");
+        assert_eq!(
+            terminal.screen().cell(2, 0).unwrap().style.foreground,
+            Color::Indexed(255)
+        );
     }
 
     #[test]

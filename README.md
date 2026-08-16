@@ -162,8 +162,9 @@ variable make the skip explicit rather than failing the core test suite.
 ## Process lifecycle
 
 Session close is idempotent and bounded. It first requests graceful EOF, then
-sends SIGTERM, then uses the process adapter's forced kill if the child still
-runs. Process state distinguishes running, normal exit codes, and signal exits.
+sends SIGTERM, then SIGKILL to the isolated Unix process group if any process
+still runs. This also cleans up descendants spawned by shells and CLIs. Process
+state distinguishes running, normal exit codes, and signal exits.
 Recent lifecycle events are included in timeout diagnostics. Dropping the last
 session handle also performs bounded termination and reaps the child.
 `startup_timeout` bounds PTY process creation; `shutdown_timeout` bounds the

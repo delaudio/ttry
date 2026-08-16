@@ -27,6 +27,16 @@ fn main() {
                 thread::sleep(Duration::from_secs(60));
             }
         }
+        #[cfg(unix)]
+        "tree" => {
+            let mut child = std::process::Command::new("sh")
+                .args(["-c", "sleep 60"])
+                .spawn()
+                .expect("spawn descendant");
+            println!("DESCENDANT_PID={}", child.id());
+            io::stdout().flush().unwrap();
+            let _ = child.wait();
+        }
         "resize" => resize_fixture(),
         "fail" => std::process::exit(7),
         _ => echo_loop(),

@@ -112,3 +112,32 @@ fn drop_cleanup_reaps_the_child_process() {
     }
     assert!(kill(Pid::from_raw(pid as i32), None).is_err());
 }
+
+#[cfg(unix)]
+#[test]
+fn cleanup_terminates_the_entire_process_group() {
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+
+    let mut options = fixture("tree");
+    options.shutdown_timeout = Duration::from_millis(900);
+    let session = TuiSession::launch(options).unwrap();
+    session
+        .wait_for_text("DESCENDANT_PID=", Duration::from_secs(2))
+        .unwrap();
+    let descendant = session
+        .screen()
+        .text()
+        .split("DESCENDANT_PID=")
+        .nth(1)
+        .and_then(|suffix| suffix.split_whitespace().next())
+        .and_then(|value| value.parse::<i32>().ok())
+        .expect("fixture should print its descendant PID");
+    session.close().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while kill(Pid::from_raw(descendant), None).is_ok() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(kill(Pid::from_raw(descendant), None).is_err());
+}

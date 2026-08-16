@@ -7,7 +7,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use nix::sys::signal::{kill, Signal};
+#[cfg(unix)]
+use nix::errno::Errno;
+#[cfg(unix)]
+use nix::sys::signal::{killpg, Signal};
+#[cfg(unix)]
 use nix::unistd::Pid;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
@@ -73,6 +77,8 @@ struct ProcessInner {
     command: String,
     shutdown_timeout: Duration,
     events: Mutex<Vec<String>>,
+    #[cfg(unix)]
+    process_group: Option<i32>,
 }
 
 #[derive(Clone)]
@@ -153,6 +159,8 @@ impl PtyProcess {
                 command: command_display.clone(),
                 source: source.into(),
             })?;
+        #[cfg(unix)]
+        let process_group = child.process_id().and_then(|pid| i32::try_from(pid).ok());
         drop(pair.slave);
         let reader = pair
             .master
@@ -177,6 +185,8 @@ impl PtyProcess {
                 command: command_display,
                 shutdown_timeout: options.shutdown_timeout,
                 events: Mutex::new(vec!["process launched".into()]),
+                #[cfg(unix)]
+                process_group,
             }),
         };
         Ok((process, reader))
@@ -192,7 +202,6 @@ impl PtyProcess {
             Ok(Some(status)) => {
                 let normalized = normalize_status(status);
                 *cached_exit = Some(normalized.clone());
-                self.inner.closed.store(true, Ordering::Release);
                 self.inner
                     .events
                     .lock()
@@ -259,51 +268,56 @@ impl PtyProcess {
         if self.inner.closed.load(Ordering::Acquire) {
             return Ok(());
         }
-        if !self.is_running() {
-            self.inner.closed.store(true, Ordering::Release);
-            return Ok(());
+        if self.is_running() {
+            self.inner
+                .events
+                .lock()
+                .expect("events lock poisoned")
+                .push("graceful close requested".into());
+            let _ = self
+                .inner
+                .writer
+                .lock()
+                .expect("writer lock poisoned")
+                .write_all(&[0x04]);
         }
-        self.inner
-            .events
-            .lock()
-            .expect("events lock poisoned")
-            .push("graceful close requested".into());
-        let _ = self
-            .inner
-            .writer
-            .lock()
-            .expect("writer lock poisoned")
-            .write_all(&[0x04]);
-        if self.wait_until_exit(self.inner.shutdown_timeout / 3) {
+        if self.wait_until_tree_exit(self.inner.shutdown_timeout / 3) {
             self.inner.closed.store(true, Ordering::Release);
             return Ok(());
         }
 
         #[cfg(unix)]
-        if let Some(pid) = self.process_id() {
+        {
             self.inner
                 .events
                 .lock()
                 .expect("events lock poisoned")
-                .push("SIGTERM sent".into());
-            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
-            if self.wait_until_exit(self.inner.shutdown_timeout / 3) {
+                .push("SIGTERM sent to process group".into());
+            self.signal_process_group(Signal::SIGTERM)?;
+            if self.wait_until_tree_exit(self.inner.shutdown_timeout / 3) {
                 self.inner.closed.store(true, Ordering::Release);
                 return Ok(());
             }
         }
+
         self.inner
             .events
             .lock()
             .expect("events lock poisoned")
-            .push("SIGKILL sent".into());
+            .push("forced termination requested".into());
+
+        #[cfg(unix)]
+        self.signal_process_group(Signal::SIGKILL)?;
+
+        #[cfg(not(unix))]
         self.inner
             .child
             .lock()
             .expect("child lock poisoned")
             .kill()
             .map_err(|error| Error::Io(std::io::Error::other(error)))?;
-        if self.wait_until_exit(self.inner.shutdown_timeout / 3) {
+
+        if self.wait_until_tree_exit(self.inner.shutdown_timeout / 3) {
             self.inner.closed.store(true, Ordering::Release);
             Ok(())
         } else {
@@ -314,10 +328,15 @@ impl PtyProcess {
         }
     }
 
-    fn wait_until_exit(&self, timeout: Duration) -> bool {
+    fn wait_until_tree_exit(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
-            if !self.is_running() {
+            let leader_exited = !self.is_running();
+            #[cfg(unix)]
+            let group_exited = !self.process_group_is_running();
+            #[cfg(not(unix))]
+            let group_exited = true;
+            if leader_exited && group_exited {
                 return true;
             }
             if Instant::now() >= deadline {
@@ -325,6 +344,28 @@ impl PtyProcess {
             }
             thread::sleep(Duration::from_millis(10).min(timeout));
         }
+    }
+
+    #[cfg(unix)]
+    fn signal_process_group(&self, signal: Signal) -> Result<()> {
+        let Some(process_group) = self.inner.process_group else {
+            return Ok(());
+        };
+        match killpg(Pid::from_raw(process_group), signal) {
+            Ok(()) | Err(Errno::ESRCH) => Ok(()),
+            Err(error) => Err(Error::Io(std::io::Error::from_raw_os_error(error as i32))),
+        }
+    }
+
+    #[cfg(unix)]
+    fn process_group_is_running(&self) -> bool {
+        self.inner.process_group.is_some_and(|process_group| {
+            match killpg(Pid::from_raw(process_group), None::<Signal>) {
+                Ok(()) => true,
+                Err(Errno::ESRCH) => false,
+                Err(_) => true,
+            }
+        })
     }
 }
 
@@ -345,12 +386,28 @@ impl Drop for ProcessInner {
         }
         let child = self.child.get_mut().expect("child lock poisoned");
         if matches!(child.try_wait(), Ok(Some(_))) {
+            #[cfg(not(unix))]
             return;
+        }
+
+        #[cfg(unix)]
+        if let Some(process_group) = self.process_group {
+            let _ = killpg(Pid::from_raw(process_group), Signal::SIGKILL);
         }
         let _ = child.kill();
         let deadline = Instant::now() + self.shutdown_timeout;
         loop {
-            if matches!(child.try_wait(), Ok(Some(_))) || Instant::now() >= deadline {
+            let leader_exited = matches!(child.try_wait(), Ok(Some(_)));
+            #[cfg(unix)]
+            let group_exited = self.process_group.is_none_or(|process_group| {
+                matches!(
+                    killpg(Pid::from_raw(process_group), None::<Signal>),
+                    Err(Errno::ESRCH)
+                )
+            });
+            #[cfg(not(unix))]
+            let group_exited = true;
+            if (leader_exited && group_exited) || Instant::now() >= deadline {
                 break;
             }
             thread::sleep(Duration::from_millis(10).min(self.shutdown_timeout));
