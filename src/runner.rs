@@ -131,6 +131,15 @@ impl Config {
                     ),
                 });
             }
+            if test.shutdown_timeout_ms == Some(0) {
+                return Err(Error::Config {
+                    path: path.to_path_buf(),
+                    message: format!(
+                        "shutdown_timeout_ms for test `{}` must be greater than zero",
+                        test.name
+                    ),
+                });
+            }
             test.cwd = Some(match test.cwd.take() {
                 Some(cwd) if cwd.is_absolute() => cwd,
                 Some(cwd) => config_directory.join(cwd),
@@ -169,6 +178,8 @@ pub struct ConfiguredTest {
     pub skip: bool,
     pub focus: bool,
     pub timeout_ms: Option<u64>,
+    /// Bounded process-tree and PTY-reader cleanup timeout. Defaults to 600 ms.
+    pub shutdown_timeout_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -546,7 +557,8 @@ pub fn run_config(config: Config, options: RunOptions) -> RunReport {
                 .args(configured.args)
                 .size(configured.cols.unwrap_or(80), configured.rows.unwrap_or(24));
             launch.startup_timeout = remaining()?;
-            launch.shutdown_timeout = Duration::from_millis(600);
+            launch.shutdown_timeout =
+                Duration::from_millis(configured.shutdown_timeout_ms.unwrap_or(600));
             if let Some(cwd) = configured.cwd {
                 launch = launch.cwd(cwd);
             }
@@ -670,6 +682,21 @@ mod tests {
             Config::load(file.path()),
             Err(Error::Config { message, .. })
                 if message.contains("allow_running_grace_ms")
+                    && message.contains("greater than zero")
+        ));
+    }
+    #[test]
+    fn zero_configured_shutdown_timeout_is_rejected() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(
+            file.path(),
+            "[[tests]]\nname = 'case'\ncommand = 'app'\nshutdown_timeout_ms = 0\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            Config::load(file.path()),
+            Err(Error::Config { message, .. })
+                if message.contains("shutdown_timeout_ms")
                     && message.contains("greater than zero")
         ));
     }

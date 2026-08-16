@@ -46,10 +46,11 @@ jobs:
       - run: cargo build --locked --manifest-path fixtures/ratatui/Cargo.toml
       - run: gofmt -w fixtures/bubbletea/*.go && git diff --exit-code -- fixtures/bubbletea/*.go
       - run: go -C fixtures/bubbletea build -o "$RUNNER_TEMP/ttry-bubbletea" .
-      - run: python -m pip install -r fixtures/textual/requirements.txt
+      - run: python -m venv "$RUNNER_TEMP/ttry-textual-venv"
+      - run: "$RUNNER_TEMP/ttry-textual-venv/bin/python" -m pip install -r fixtures/textual/requirements.txt
       - name: Run opt-in framework smoke tests
         env:
           TTRY_RATATUI_BIN: fixtures/ratatui/target/debug/ttry-ratatui-fixture
           TTRY_BUBBLETEA_BIN: ${{ runner.temp }}/ttry-bubbletea
-          TTRY_TEXTUAL_PYTHON: python
+          TTRY_TEXTUAL_PYTHON: ${{ runner.temp }}/ttry-textual-venv/bin/python
         run: cargo test --locked --test frameworks -- --ignored --test-threads=1

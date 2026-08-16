@@ -132,6 +132,9 @@ configuration file's directory. Commands containing a relative path such as
 `./tool` are then resolved from that effective `cwd`; bare command names use
 `PATH`. A run with no selected tests or any failed test makes the CLI exit nonzero;
 the final report always contains deterministic pass/fail/skip counts.
+Per-test `shutdown_timeout_ms` controls bounded process-tree and PTY-reader
+cleanup and defaults to 600 ms. The `dot` reporter writes only progress symbols
+and a newline to stdout; its human-readable summary is written to stderr.
 
 Rust-authored suites can use `Runner`, `TestCase`, and `TestContext::tui` to
 register tests and groups directly. The context owns every session and runs

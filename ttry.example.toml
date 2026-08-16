@@ -8,6 +8,7 @@ command = "./target/debug/ttry-fixture"
 args = ["echo"]
 cols = 80
 rows = 24
+shutdown_timeout_ms = 600
 input = "hello\n"
 expect_text = "INPUT:hello"
 

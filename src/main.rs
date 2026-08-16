@@ -88,6 +88,7 @@ fn main() -> ExitCode {
                             }
                         }
                     }
+                    println!("{}", report.summary());
                 }
                 Reporter::Dot => {
                     for result in &report.tests {
@@ -101,9 +102,10 @@ fn main() -> ExitCode {
                         );
                     }
                     println!();
+                    // Keep stdout machine-stable for compact progress parsers.
+                    eprintln!("{}", report.summary());
                 }
             }
-            println!("{}", report.summary());
             if report.success() {
                 ExitCode::SUCCESS
             } else {

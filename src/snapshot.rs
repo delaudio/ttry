@@ -1,5 +1,7 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use similar::{ChangeTag, TextDiff};
 
@@ -81,11 +83,50 @@ pub fn serialize_screen(screen: &Screen, preserve_width: bool) -> String {
 }
 
 fn write_snapshot(path: &Path, content: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+    static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("snapshot");
+    let mut temporary = None;
+    for _ in 0..100 {
+        let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(".{filename}.tmp-{}-{id}", std::process::id()));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => {
+                temporary = Some((candidate, file));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
     }
-    fs::write(path, content)?;
-    Ok(())
+    let Some((temporary_path, mut file)) = temporary else {
+        return Err(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "could not allocate a temporary snapshot beside {}",
+                path.display()
+            ),
+        )));
+    };
+    let result = (|| -> std::io::Result<()> {
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary_path, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
+    }
+    result.map_err(Error::Io)
 }
 
 fn sanitize_name(name: &str) -> String {
@@ -163,6 +204,16 @@ mod tests {
             verify.assert_screen("case", &terminal.screen()),
             Err(Error::SnapshotMismatch { .. })
         ));
+        assert!(matches!(
+            update.assert_screen("case", &terminal.screen()).unwrap(),
+            SnapshotResult::Updated(_)
+        ));
+        let entries: Vec<_> = fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].to_string_lossy().ends_with(".snap"));
     }
 
     #[test]
