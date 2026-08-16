@@ -141,6 +141,10 @@ impl Buffer {
             self.newline();
         }
         if let Some(index) = self.index(self.cursor_col, self.cursor_row) {
+            self.clear_wide_glyph_at(index);
+            if width == 2 {
+                self.clear_wide_glyph_at(index + 1);
+            }
             self.cells[index] = Cell {
                 text: ch.to_string(),
                 style: self.style,
@@ -164,6 +168,24 @@ impl Buffer {
             self.cursor_col = next_col;
         }
         true
+    }
+
+    fn clear_wide_glyph_at(&mut self, index: usize) {
+        if self.cells[index].continuation {
+            self.cells[index] = Cell::default();
+            if index > 0 {
+                self.cells[index - 1] = Cell::default();
+            }
+            return;
+        }
+        let next = index + 1;
+        if next < self.cells.len()
+            && next / self.cols as usize == index / self.cols as usize
+            && self.cells[next].continuation
+        {
+            self.cells[index] = Cell::default();
+            self.cells[next] = Cell::default();
+        }
     }
 
     fn erase(&mut self, start: usize, end: usize) -> bool {
@@ -759,6 +781,19 @@ mod tests {
         assert!(screen.cell(1, 0).unwrap().continuation);
         assert_eq!(screen.cell(2, 0).unwrap().text, "e\u{301}");
         assert_eq!(screen.cell(3, 0).unwrap().text, "x");
+    }
+
+    #[test]
+    fn overwriting_wide_characters_clears_both_cells() {
+        let mut terminal = Terminal::new(4, 1).unwrap();
+        terminal.advance("界".as_bytes());
+        terminal.advance(b"\rx");
+        assert_eq!(terminal.screen().fixed_text(), "x   ");
+
+        terminal.advance(b"\r");
+        terminal.advance("界".as_bytes());
+        terminal.advance(b"\x1b[1Dy");
+        assert_eq!(terminal.screen().fixed_text(), " y  ");
     }
 
     #[test]

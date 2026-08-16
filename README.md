@@ -123,8 +123,10 @@ Rust-authored suites can use `Runner`, `TestCase`, and `TestContext::tui` to
 register tests and groups directly. The context owns every session and runs
 cleanup even when the test body returns an error. On timeout, registered
 sessions are closed and the runner waits for the test worker before starting
-the next case; custom long-running work can poll `TestContext::is_cancelled()`
-to stop cooperatively.
+the next case. Custom long-running work must poll `TestContext::is_cancelled()`
+to stop cooperatively. If it does not stop within the cancellation grace period,
+the runner returns a bounded timeout and skips the rest of the suite so a
+detached worker cannot interfere with later cases.
 
 ## Keyboard behavior
 

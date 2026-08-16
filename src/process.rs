@@ -98,9 +98,24 @@ impl PtyProcess {
         }
         let command_display = options.command.to_string_lossy().into_owned();
         let command_path = std::path::Path::new(&options.command);
+        let resolved_cwd = options
+            .cwd
+            .as_deref()
+            .map(|cwd| {
+                if cwd.is_absolute() {
+                    Ok(cwd.to_path_buf())
+                } else {
+                    std::env::current_dir()
+                        .map(|current| current.join(cwd))
+                        .map_err(|source| Error::Launch {
+                            command: command_display.clone(),
+                            source: source.into(),
+                        })
+                }
+            })
+            .transpose()?;
         let executable = if !command_path.is_absolute() && command_path.components().count() > 1 {
-            options
-                .cwd
+            resolved_cwd
                 .as_deref()
                 .unwrap_or_else(|| std::path::Path::new("."))
                 .join(command_path)
@@ -124,7 +139,7 @@ impl PtyProcess {
         command.env("TERM", &options.term);
         command.env("COLUMNS", options.cols.to_string());
         command.env("LINES", options.rows.to_string());
-        if let Some(cwd) = &options.cwd {
+        if let Some(cwd) = &resolved_cwd {
             command.cwd(cwd);
         }
         for (key, value) in &options.env {

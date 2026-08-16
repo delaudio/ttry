@@ -21,6 +21,20 @@ fn launches_in_pty_with_term_dimensions_and_exit() {
 }
 
 #[test]
+fn relative_executable_resolves_once_against_relative_cwd() {
+    let session = TuiSession::launch(
+        LaunchOptions::new("./ttry-fixture")
+            .arg("info")
+            .cwd("target/debug")
+            .size(40, 8),
+    )
+    .unwrap();
+    session
+        .wait_for_text("TERM=xterm-256color SIZE=40x8", Duration::from_secs(2))
+        .unwrap();
+}
+
+#[test]
 fn keyboard_input_reaches_child_and_updates_screen() {
     let session = TuiSession::launch(fixture("echo")).unwrap();
     session

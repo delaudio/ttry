@@ -10,6 +10,8 @@ use serde::Deserialize;
 use crate::session::{LaunchOptions, TuiSession};
 use crate::{Error, Result};
 
+const CANCELLATION_GRACE: Duration = Duration::from_millis(100);
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Reporter {
     #[default]
@@ -156,6 +158,11 @@ pub struct TestContext {
 
 impl TestContext {
     pub fn tui(&mut self, options: LaunchOptions) -> Result<TuiSession> {
+        if self.is_cancelled() {
+            return Err(Error::Runner(
+                "test was cancelled before launching a new TUI session".into(),
+            ));
+        }
         let session = TuiSession::launch(options)?;
         self.sessions
             .lock()
@@ -255,7 +262,8 @@ impl Runner {
     pub fn run(self, grep: Option<&str>) -> RunReport {
         let focused = self.tests.iter().any(|test| test.focus);
         let mut report = RunReport::default();
-        for test in self.tests {
+        let mut tests = self.tests.into_iter();
+        while let Some(test) = tests.next() {
             let name = test.full_name();
             let filtered = grep.is_some_and(|pattern| !name.contains(pattern));
             if test.skip || filtered || (focused && !test.focus) {
@@ -285,11 +293,11 @@ impl Runner {
                     let result = (test.body)(&mut context).and(context.cleanup());
                     let _ = sender.send(result);
                 });
-            let result = match spawn {
+            let (result, abort_remaining) = match spawn {
                 Ok(worker) => match receiver.recv_timeout(timeout) {
                     Ok(result) => {
                         let _ = worker.join();
-                        result
+                        (result, false)
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         cancelled.store(true, Ordering::Release);
@@ -298,20 +306,35 @@ impl Runner {
                             cancelled,
                         };
                         let _ = context.cleanup();
-                        let _ = worker.join();
-                        Err(Error::Timeout {
-                            timeout,
-                            context: format!("test `{name_for_worker}` exceeded its timeout"),
-                        })
+                        let stopped = !matches!(
+                            receiver.recv_timeout(CANCELLATION_GRACE),
+                            Err(mpsc::RecvTimeoutError::Timeout)
+                        );
+                        if stopped {
+                            let _ = worker.join();
+                        }
+                        (
+                            Err(Error::Timeout {
+                                timeout,
+                                context: format!("test `{name_for_worker}` exceeded its timeout"),
+                            }),
+                            !stopped,
+                        )
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
                         let _ = worker.join();
-                        Err(Error::Runner(format!("test `{name_for_worker}` panicked")))
+                        (
+                            Err(Error::Runner(format!("test `{name_for_worker}` panicked"))),
+                            false,
+                        )
                     }
                 },
-                Err(error) => Err(Error::Runner(format!(
-                    "could not start test `{name}`: {error}"
-                ))),
+                Err(error) => (
+                    Err(Error::Runner(format!(
+                        "could not start test `{name}`: {error}"
+                    ))),
+                    false,
+                ),
             };
             let duration = started.elapsed();
             match result {
@@ -331,6 +354,17 @@ impl Runner {
                         duration,
                     });
                 }
+            }
+            if abort_remaining {
+                for remaining in tests {
+                    report.skipped += 1;
+                    report.tests.push(TestResult {
+                        name: remaining.full_name(),
+                        status: TestStatus::Skipped,
+                        duration: Duration::ZERO,
+                    });
+                }
+                break;
             }
         }
         report
@@ -428,16 +462,24 @@ mod tests {
         ));
     }
     #[test]
-    fn timeout_joins_the_test_body_before_continuing() {
+    fn non_cooperative_timeout_is_bounded_and_aborts_remaining_tests() {
+        let reached_next_test = Arc::new(AtomicBool::new(false));
+        let next_test_marker = Arc::clone(&reached_next_test);
         let mut runner = Runner::new(Duration::from_millis(20));
         runner.register(TestCase::new("slow", |_| {
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(Duration::from_millis(500));
+            Ok(())
+        }));
+        runner.register(TestCase::new("must not run", move |_| {
+            next_test_marker.store(true, Ordering::Release);
             Ok(())
         }));
         let started = Instant::now();
         let report = runner.run(None);
         assert_eq!(report.failed, 1);
-        assert!(started.elapsed() >= Duration::from_millis(150));
+        assert_eq!(report.skipped, 1);
+        assert!(started.elapsed() < Duration::from_millis(300));
+        assert!(!reached_next_test.load(Ordering::Acquire));
     }
     #[test]
     fn per_test_timeout_overrides_runner_default() {
@@ -452,7 +494,7 @@ mod tests {
         let started = Instant::now();
         let report = runner.run(None);
         assert_eq!(report.failed, 1);
-        assert!(started.elapsed() >= Duration::from_millis(150));
+        assert!(started.elapsed() < Duration::from_millis(300));
     }
     #[test]
     fn test_body_can_observe_timeout_cancellation() {
