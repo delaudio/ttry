@@ -20,6 +20,14 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use crate::screen::validate_dimensions;
 use crate::{Error, Result};
 
+fn try_wait_child(child: &mut dyn Child) -> Result<Option<portable_pty::ExitStatus>> {
+    // portable-pty 0.9 exposes Child::try_wait as std::io::Result. Keep the
+    // concrete type visible here so error conversion cannot be confused with
+    // the anyhow::Result used by some other portable-pty APIs.
+    let result: std::io::Result<Option<portable_pty::ExitStatus>> = child.try_wait();
+    result.map_err(Error::Io)
+}
+
 #[cfg(unix)]
 enum ExitObservation {
     Running,
@@ -681,7 +689,7 @@ impl PtyProcess {
     #[cfg(not(unix))]
     fn observe_non_unix_state(&self, leader: &mut LeaderLifecycle) -> Result<ProcessState> {
         let mut child = self.inner.child.lock().expect("child lock poisoned");
-        match child.try_wait()? {
+        match try_wait_child(child.as_mut())? {
             Some(status) => {
                 let normalized = normalize_status(status);
                 leader.record_reaped(normalized.clone());
@@ -743,17 +751,17 @@ impl PtyProcess {
         return Ok(());
 
         #[cfg(any(target_vendor = "apple", target_os = "linux"))]
-        if let Some(status) = self
-            .inner
-            .child
-            .lock()
-            .expect("child lock poisoned")
-            .try_wait()?
         {
-            let normalized = normalize_status(status);
-            leader.record_reaped(normalized);
-            self.inner.cleanup_complete.store(true, Ordering::Release);
-            self.record_event("process reaped after terminal state observation");
+            let status = {
+                let mut child = self.inner.child.lock().expect("child lock poisoned");
+                try_wait_child(child.as_mut())?
+            };
+            if let Some(status) = status {
+                let normalized = normalize_status(status);
+                leader.record_reaped(normalized);
+                self.inner.cleanup_complete.store(true, Ordering::Release);
+                self.record_event("process reaped after terminal state observation");
+            }
         }
         Ok(())
     }
@@ -913,7 +921,7 @@ impl PtyProcess {
                     return Ok(true);
                 }
                 let mut child = self.inner.child.lock().expect("child lock poisoned");
-                match child.try_wait()? {
+                match try_wait_child(child.as_mut())? {
                     Some(status) => {
                         leader.record_reaped(normalize_status(status));
                         true
