@@ -204,27 +204,28 @@ fn encode_modified(ctrl: bool, alt: bool, shift: bool, key: &Key) -> Result<Vec<
             }
         }
     }
+    let navigation_code = match key {
+        Key::ArrowUp => Some('A'),
+        Key::ArrowDown => Some('B'),
+        Key::ArrowRight => Some('C'),
+        Key::ArrowLeft => Some('D'),
+        Key::Home => Some('H'),
+        Key::End => Some('F'),
+        _ => None,
+    };
+    if let Some(code) = navigation_code {
+        let modifier = 1 + shift as u8 + (alt as u8 * 2) + (ctrl as u8 * 4);
+        return Ok(format!("\x1b[1;{modifier}{code}").into_bytes());
+    }
     if alt && !ctrl && !shift {
         let mut bytes = vec![0x1b];
         bytes.extend(key.encode()?);
         return Ok(bytes);
     }
-    let code = match key {
-        Key::ArrowUp => 'A',
-        Key::ArrowDown => 'B',
-        Key::ArrowRight => 'C',
-        Key::ArrowLeft => 'D',
-        Key::Home => 'H',
-        Key::End => 'F',
-        _ => {
-            return Err(Error::UnsupportedKey(
-                format!("{key:?}"),
-                "this modifier combination has no portable terminal encoding".into(),
-            ))
-        }
-    };
-    let modifier = 1 + shift as u8 + (alt as u8 * 2) + (ctrl as u8 * 4);
-    Ok(format!("\x1b[1;{modifier}{code}").into_bytes())
+    Err(Error::UnsupportedKey(
+        format!("{key:?}"),
+        "this modifier combination has no portable terminal encoding".into(),
+    ))
 }
 
 #[derive(Clone)]
@@ -300,6 +301,18 @@ mod tests {
     fn modifier_encodings() {
         assert_eq!(Key::parse("ctrl+c").unwrap().encode().unwrap(), vec![3]);
         assert_eq!(Key::parse("alt+x").unwrap().encode().unwrap(), b"\x1bx");
+        assert_eq!(
+            Key::parse("alt+up").unwrap().encode().unwrap(),
+            b"\x1b[1;3A"
+        );
+        assert_eq!(
+            Key::parse("alt+left").unwrap().encode().unwrap(),
+            b"\x1b[1;3D"
+        );
+        assert_eq!(
+            Key::parse("alt+home").unwrap().encode().unwrap(),
+            b"\x1b[1;3H"
+        );
         assert_eq!(
             Key::parse("shift+tab").unwrap().encode().unwrap(),
             b"\x1b[Z"
