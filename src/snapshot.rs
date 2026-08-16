@@ -89,6 +89,7 @@ fn write_snapshot(path: &Path, content: &str) -> Result<()> {
 }
 
 fn sanitize_name(name: &str) -> String {
+    const MAX_SLUG_LEN: usize = 96;
     let value: String = name
         .chars()
         .map(|ch| {
@@ -99,7 +100,13 @@ fn sanitize_name(name: &str) -> String {
             }
         })
         .collect();
-    value.trim_matches('-').to_string()
+    value
+        .trim_matches('-')
+        .chars()
+        .take(MAX_SLUG_LEN)
+        .collect::<String>()
+        .trim_end_matches('-')
+        .to_string()
 }
 
 fn stable_hash(bytes: &[u8]) -> u64 {
@@ -169,5 +176,10 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .starts_with("snapshot--"));
+
+        let long_name = "very-long-name-".repeat(1_000);
+        let filename = store.path_for(&long_name).file_name().unwrap().to_owned();
+        assert!(filename.as_encoded_bytes().len() < 128);
+        assert!(filename.to_string_lossy().ends_with(".snap"));
     }
 }

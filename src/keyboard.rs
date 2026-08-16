@@ -195,11 +195,13 @@ fn encode_modified(ctrl: bool, alt: bool, shift: bool, key: &Key) -> Result<Vec<
             let mut chars = text.chars();
             if let (Some(ch), None) = (chars.next(), chars.next()) {
                 if ch.is_ascii_alphabetic() {
-                    let mut bytes = ch.to_ascii_uppercase().to_string().into_bytes();
                     if alt {
-                        bytes.insert(0, 0x1b);
+                        return Err(Error::UnsupportedKey(
+                            format!("{key:?}"),
+                            "Alt+Shift letters have no distinct portable terminal encoding".into(),
+                        ));
                     }
-                    return Ok(bytes);
+                    return Ok(ch.to_ascii_uppercase().to_string().into_bytes());
                 }
             }
         }
@@ -319,10 +321,10 @@ mod tests {
         );
         assert_eq!(Key::parse("A").unwrap().encode().unwrap(), b"A");
         assert_eq!(Key::parse("shift+a").unwrap().encode().unwrap(), b"A");
-        assert_eq!(
-            Key::parse("alt+shift+a").unwrap().encode().unwrap(),
-            b"\x1bA"
-        );
+        assert!(matches!(
+            Key::parse("alt+shift+a"),
+            Err(Error::UnsupportedKey(expression, _)) if expression == "alt+shift+a"
+        ));
         assert!(Key::parse("hyper+x").is_err());
         assert!(Key::parse("ctrl+control+c").is_err());
         assert!(Key::parse("alt+option+x").is_err());

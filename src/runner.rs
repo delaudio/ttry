@@ -339,8 +339,19 @@ impl Runner {
                 });
                 continue;
             }
-            let started = Instant::now();
             let timeout = test.timeout.unwrap_or(self.timeout);
+            if timeout.is_zero() {
+                report.failed += 1;
+                report.tests.push(TestResult {
+                    name,
+                    status: TestStatus::Failed(
+                        Error::InvalidTimeout { field: "timeout" }.to_string(),
+                    ),
+                    duration: Duration::ZERO,
+                });
+                continue;
+            }
+            let started = Instant::now();
             let sessions = Arc::new(Mutex::new(Vec::new()));
             let cancelled = Arc::new(AtomicBool::new(false));
             let worker_sessions = Arc::clone(&sessions);
@@ -827,6 +838,29 @@ mod tests {
 
         assert_eq!(report.passed, 1);
         assert_eq!(report.tests[0].name, name);
+    }
+    #[test]
+    fn typed_runner_rejects_zero_timeouts_before_running_test_bodies() {
+        let body_ran = Arc::new(AtomicBool::new(false));
+        let marker = Arc::clone(&body_ran);
+        let mut runner = Runner::new(Duration::ZERO);
+        runner.register(TestCase::new("zero default", move |_| {
+            marker.store(true, Ordering::Release);
+            Ok(())
+        }));
+
+        let report = runner.run(None);
+
+        assert_eq!((report.passed, report.failed), (0, 1));
+        assert!(!body_ran.load(Ordering::Acquire));
+        assert!(matches!(
+            &report.tests[0].status,
+            TestStatus::Failed(message) if message.contains("timeout must be greater than zero")
+        ));
+
+        let mut runner = Runner::new(Duration::from_secs(1));
+        runner.register(TestCase::new("zero override", |_| Ok(())).timeout(Duration::ZERO));
+        assert_eq!(runner.run(None).failed, 1);
     }
     #[cfg(unix)]
     #[test]
