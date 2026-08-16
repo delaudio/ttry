@@ -164,10 +164,18 @@ impl TestContext {
             ));
         }
         let session = TuiSession::launch(options)?;
-        self.sessions
+        let mut sessions = self
+            .sessions
             .lock()
-            .expect("session registry lock poisoned")
-            .push(session.clone());
+            .expect("session registry lock poisoned");
+        if self.is_cancelled() {
+            drop(sessions);
+            let _ = session.close();
+            return Err(Error::Runner(
+                "test was cancelled while launching a TUI session".into(),
+            ));
+        }
+        sessions.push(session.clone());
         Ok(session)
     }
     /// Returns true once the runner has reached this test's timeout.

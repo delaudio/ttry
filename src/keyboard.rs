@@ -35,6 +35,11 @@ impl Key {
         if expression.is_empty() {
             return Err(Error::InvalidKey(expression.into()));
         }
+        if expression.chars().count() == 1
+            && expression.chars().next().is_some_and(|ch| !ch.is_control())
+        {
+            return Ok(Key::Text(expression.into()));
+        }
         let normalized = expression.trim().to_lowercase();
         let parts: Vec<&str> = normalized.split('+').collect();
         let original_key = expression.trim().rsplit('+').next().unwrap_or(expression);
@@ -247,6 +252,12 @@ mod tests {
         for (input, expected) in cases {
             assert_eq!(Key::parse(input).unwrap().encode().unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn plus_and_space_are_printable_keys() {
+        assert_eq!(Key::parse("+").unwrap().encode().unwrap(), b"+");
+        assert_eq!(Key::parse(" ").unwrap().encode().unwrap(), b" ");
     }
     #[test]
     fn modifier_encodings() {

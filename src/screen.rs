@@ -189,6 +189,14 @@ impl Buffer {
     }
 
     fn erase(&mut self, start: usize, end: usize) -> bool {
+        let mut start = start;
+        let mut end = end;
+        if start < end && self.cells[start].continuation && start > 0 {
+            start -= 1;
+        }
+        if end < self.cells.len() && self.cells[end].continuation {
+            end += 1;
+        }
         let changed = self.cells[start..end]
             .iter()
             .any(|cell| *cell != Cell::default());
@@ -268,7 +276,8 @@ impl Screen {
     pub fn dimensions(&self) -> (u16, u16) {
         let state = self.inner.state.read().expect("screen lock poisoned");
         let active = state.active();
-        (active.cols, active.rows)
+        let rect = self.effective_rect(active);
+        (rect.width, rect.height)
     }
 
     pub fn cell(&self, col: u16, row: u16) -> Option<Cell> {
@@ -279,7 +288,7 @@ impl Screen {
             return None;
         }
         active
-            .index(rect.col + col, rect.row + row)
+            .index(rect.col.saturating_add(col), rect.row.saturating_add(row))
             .map(|index| active.cells[index].clone())
     }
 
@@ -291,12 +300,14 @@ impl Screen {
             .map(|relative_row| {
                 let mut line = String::new();
                 for relative_col in 0..rect.width {
-                    let index = active
-                        .index(rect.col + relative_col, rect.row + relative_row)
-                        .unwrap();
-                    let cell = &active.cells[index];
-                    if !cell.continuation {
-                        line.push_str(&cell.text);
+                    if let Some(index) = active.index(
+                        rect.col.saturating_add(relative_col),
+                        rect.row.saturating_add(relative_row),
+                    ) {
+                        let cell = &active.cells[index];
+                        if !cell.continuation {
+                            line.push_str(&cell.text);
+                        }
                     }
                 }
                 if !preserve_width {
@@ -316,8 +327,9 @@ impl Screen {
     }
 
     pub fn region(&self, rect: Rect) -> Result<Self> {
-        let (cols, rows) = self.dimensions();
-        let parent = self.region.unwrap_or(Rect::new(0, 0, cols, rows));
+        let state = self.inner.state.read().expect("screen lock poisoned");
+        let active = state.active();
+        let parent = self.effective_rect(active);
         if rect.width == 0
             || rect.height == 0
             || rect
@@ -432,8 +444,17 @@ impl Screen {
     }
 
     fn effective_rect(&self, active: &Buffer) -> Rect {
-        self.region
-            .unwrap_or(Rect::new(0, 0, active.cols, active.rows))
+        let Some(region) = self.region else {
+            return Rect::new(0, 0, active.cols, active.rows);
+        };
+        let col = region.col.min(active.cols);
+        let row = region.row.min(active.rows);
+        Rect::new(
+            col,
+            row,
+            region.width.min(active.cols.saturating_sub(col)),
+            region.height.min(active.rows.saturating_sub(row)),
+        )
     }
 }
 
@@ -808,6 +829,32 @@ mod tests {
                 .fixed_text(),
             "bcd\n234"
         );
+    }
+
+    #[test]
+    fn regions_remain_safe_and_clamp_after_resize() {
+        let screen = Screen::new(5, 3).unwrap();
+        let region = screen.region(Rect::new(2, 1, 3, 2)).unwrap();
+        screen.resize(3, 2).unwrap();
+        assert_eq!(region.dimensions(), (1, 1));
+        assert_eq!(region.fixed_text(), " ");
+        screen.resize(1, 1).unwrap();
+        assert_eq!(region.dimensions(), (0, 0));
+        assert_eq!(region.fixed_text(), "");
+        assert!(region.cell(0, 0).is_none());
+    }
+
+    #[test]
+    fn erase_expands_across_wide_character_boundaries() {
+        let mut terminal = Terminal::new(4, 1).unwrap();
+        terminal.advance("界x".as_bytes());
+        terminal.advance(b"\r\x1b[1C\x1b[K");
+        assert_eq!(terminal.screen().fixed_text(), "    ");
+
+        let mut terminal = Terminal::new(4, 1).unwrap();
+        terminal.advance("x界".as_bytes());
+        terminal.advance(b"\r\x1b[1C\x1b[1K");
+        assert_eq!(terminal.screen().fixed_text(), "    ");
     }
 
     #[test]
