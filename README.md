@@ -105,8 +105,10 @@ cargo run -- test
 The configuration contains deterministic `[[tests]]` entries. Tests run
 serially and support grouping, skip/focus, initial `cols`/`rows`, input,
 expected text, expected exit, expected exit code, and per-test timeouts.
-Long-running TUIs may pass after their screen assertion while cleanup stops
-them. Set `expect_exit = true` to require any normal termination, or
+Configured commands must exit successfully by default, including after a
+screen assertion. Set `allow_running = true` for an interactive TUI that
+should pass while cleanup stops it; an immediately observable non-zero exit
+still fails, using a best-effort nonblocking check. Set `expect_exit = true` to accept any exit status, or
 `expect_exit_code` to require an exact status. CLI options override
 configuration values:
 

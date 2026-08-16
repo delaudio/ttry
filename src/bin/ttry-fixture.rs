@@ -37,6 +37,66 @@ fn main() {
             io::stdout().flush().unwrap();
             let _ = child.wait();
         }
+        #[cfg(unix)]
+        "grace-tree" => {
+            let marker = std::env::var_os("TTRY_SIGNAL_MARKER")
+                .filter(|value| !value.is_empty())
+                .expect("TTRY_SIGNAL_MARKER must be set for grace-tree");
+            let delay = std::env::var_os("TTRY_GRACE_DELAY")
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "1".into());
+            // This fixture intentionally exits without waiting so the test
+            // can exercise cleanup after the process-group leader is gone.
+            #[allow(clippy::zombie_processes)]
+            let child = std::process::Command::new("sh")
+                .args([
+                    "-c",
+                    "trap '' HUP; trap 'printf term > \"$TTRY_SIGNAL_MARKER\"; exit 0' TERM; exec </dev/null >/dev/null 2>&1; sleep \"$TTRY_GRACE_DELAY\"; printf natural > \"$TTRY_SIGNAL_MARKER\"",
+                ])
+                .env("TTRY_SIGNAL_MARKER", marker)
+                .env("TTRY_GRACE_DELAY", delay)
+                .spawn()
+                .expect("spawn graceful descendant");
+            println!("DESCENDANT_PID={}", child.id());
+            io::stdout().flush().unwrap();
+            thread::sleep(Duration::from_millis(200));
+        }
+        #[cfg(unix)]
+        "term-tree" => {
+            let marker = std::env::var_os("TTRY_SIGNAL_MARKER")
+                .filter(|value| !value.is_empty())
+                .expect("TTRY_SIGNAL_MARKER must be set for term-tree");
+            #[allow(clippy::zombie_processes)]
+            let child = std::process::Command::new("sh")
+                .args([
+                    "-c",
+                    "trap '' HUP; trap 'printf term > \"$TTRY_SIGNAL_MARKER\"; exit 0' TERM; while :; do sleep 0.05; done",
+                ])
+                .env("TTRY_SIGNAL_MARKER", marker)
+                .spawn()
+                .expect("spawn TERM-cleaned descendant");
+            println!("TERM_DESCENDANT_PID={}", child.id());
+            io::stdout().flush().unwrap();
+            thread::sleep(Duration::from_millis(200));
+        }
+        #[cfg(unix)]
+        "eof-tree" => {
+            let marker = std::env::var_os("TTRY_SIGNAL_MARKER")
+                .filter(|value| !value.is_empty())
+                .expect("TTRY_SIGNAL_MARKER must be set for eof-tree");
+            #[allow(clippy::zombie_processes)]
+            let child = std::process::Command::new("sh")
+                .args([
+                    "-c",
+                    "trap '' HUP; if IFS= read -r line; then printf input; else printf eof; fi > \"$TTRY_SIGNAL_MARKER\"",
+                ])
+                .env("TTRY_SIGNAL_MARKER", marker)
+                .spawn()
+                .expect("spawn EOF-cleaned descendant");
+            println!("EOF_DESCENDANT_PID={}", child.id());
+            io::stdout().flush().unwrap();
+            thread::sleep(Duration::from_millis(200));
+        }
         "resize" => resize_fixture(),
         "fail" => std::process::exit(7),
         _ => echo_loop(),

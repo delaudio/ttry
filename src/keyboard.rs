@@ -45,6 +45,9 @@ impl Key {
         }
         let normalized = expression.trim().to_lowercase();
         let parts: Vec<&str> = normalized.split('+').collect();
+        if parts.iter().any(|part| part.is_empty()) {
+            return Err(Error::InvalidKey(expression.into()));
+        }
         let original_key = expression.trim().rsplit('+').next().unwrap_or(expression);
         let (modifiers, key_name) = parts.split_at(parts.len() - 1);
         if modifiers
@@ -294,5 +297,7 @@ mod tests {
         assert!(Key::parse("ctrl+control+c").is_err());
         assert!(Key::parse("alt+option+x").is_err());
         assert!(Key::parse("shift+shift+a").is_err());
+        assert!(matches!(Key::parse("ctrl+"), Err(Error::InvalidKey(_))));
+        assert!(matches!(Key::parse("ctrl++"), Err(Error::InvalidKey(_))));
     }
 }

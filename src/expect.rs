@@ -93,26 +93,30 @@ impl LocatorExpect {
         self
     }
     pub fn to_be_visible(&self) -> Result<()> {
-        self.retry("to be visible", || self.locator.is_visible())
+        self.retry("to be visible", || Ok(self.locator.is_visible()))
     }
     pub fn not_to_be_visible(&self) -> Result<()> {
-        self.retry("not to be visible", || !self.locator.is_visible())
+        self.retry("not to be visible", || Ok(!self.locator.is_visible()))
     }
     pub fn to_have_text(&self, expected: &str) -> Result<()> {
         self.retry(&format!("to have text `{expected}`"), || {
-            self.locator.text().is_ok_and(|actual| actual == expected)
+            match self.locator.text() {
+                Ok(actual) => Ok(actual == expected),
+                Err(Error::StrictLocator { count: 0, .. }) => Ok(false),
+                Err(error) => Err(error),
+            }
         })
     }
     pub fn to_have_count(&self, expected: usize) -> Result<()> {
         self.retry(&format!("to have count {expected}"), || {
-            self.locator.count() == expected
+            Ok(self.locator.count() == expected)
         })
     }
 
-    fn retry(&self, expectation: &str, predicate: impl Fn() -> bool) -> Result<()> {
+    fn retry(&self, expectation: &str, predicate: impl Fn() -> Result<bool>) -> Result<()> {
         let deadline = Instant::now() + self.options.timeout;
         loop {
-            if predicate() {
+            if predicate()? {
                 return Ok(());
             }
             if let Some(process) = &self.process {
@@ -243,5 +247,24 @@ mod tests {
             .to_have_count(2)
             .unwrap();
         expect(terminal.screen()).to_contain_text("ready").unwrap();
+    }
+
+    #[test]
+    fn strict_text_errors_are_not_retried_as_timeouts() {
+        let mut terminal = Terminal::new(20, 1).unwrap();
+        terminal.advance(b"ready ready");
+        let result = expect(terminal.screen().get_by_text("ready"))
+            .timeout(Duration::from_secs(1))
+            .to_have_text("ready");
+        assert!(matches!(result, Err(Error::StrictLocator { count: 2, .. })));
+    }
+
+    #[test]
+    fn missing_text_is_retried_until_timeout() {
+        let terminal = Terminal::new(20, 1).unwrap();
+        let result = expect(terminal.screen().get_by_text("ready"))
+            .timeout(Duration::from_millis(10))
+            .to_have_text("ready");
+        assert!(matches!(result, Err(Error::Timeout { .. })));
     }
 }

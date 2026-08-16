@@ -11,6 +11,8 @@ fn fixture(mode: &str) -> LaunchOptions {
 #[test]
 fn launches_in_pty_with_term_dimensions_and_exit() {
     let session = TuiSession::launch(fixture("info")).unwrap();
+    #[cfg(unix)]
+    let pid = session.process().process_id().unwrap() as i32;
     session
         .wait_for_text("TERM=xterm-256color SIZE=40x8", Duration::from_secs(2))
         .unwrap();
@@ -18,6 +20,11 @@ fn launches_in_pty_with_term_dimensions_and_exit() {
         .timeout(Duration::from_secs(2))
         .to_have_exited_with_code(0)
         .unwrap();
+    #[cfg(unix)]
+    assert!(
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err(),
+        "terminal state observation should reap a child with no live descendants"
+    );
 }
 
 #[test]
@@ -126,6 +133,39 @@ fn cleanup_is_bounded_idempotent_and_leaves_no_child() {
 
 #[cfg(unix)]
 #[test]
+fn concurrent_state_polling_and_close_never_observe_a_reap_race() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    for _ in 0..20 {
+        let mut options = fixture("hang");
+        options.shutdown_timeout = Duration::from_millis(90);
+        let session = TuiSession::launch(options).unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+        let process = session.process().clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let poll_stop = Arc::clone(&stop);
+        let poller = std::thread::spawn(move || {
+            while !poll_stop.load(Ordering::Acquire) {
+                match process.state() {
+                    Ok(ProcessState::Running) => std::thread::yield_now(),
+                    Ok(ProcessState::Exited(_)) => return None,
+                    Err(error) => {
+                        return Some(format!("{error}; events={:?}", process.recent_events()));
+                    }
+                }
+            }
+            None
+        });
+
+        session.close().unwrap();
+        stop.store(true, Ordering::Release);
+        assert_eq!(poller.join().unwrap(), None);
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn drop_cleanup_reaps_the_child_process() {
     use nix::sys::signal::kill;
     use nix::unistd::Pid;
@@ -167,6 +207,10 @@ fn cleanup_terminates_the_entire_process_group() {
         .and_then(|suffix| suffix.split_whitespace().next())
         .and_then(|value| value.parse::<i32>().ok())
         .expect("fixture should print its descendant PID");
+    assert_eq!(
+        nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(descendant))).unwrap(),
+        nix::unistd::Pid::from_raw(session.process().process_group_id().unwrap())
+    );
     session.close().unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -174,4 +218,137 @@ fn cleanup_terminates_the_entire_process_group() {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(kill(Pid::from_raw(descendant), None).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn exited_leader_preserves_the_descendant_grace_period() {
+    let temp = tempfile::tempdir().unwrap();
+    let completion_marker = temp.path().join("descendant-completion");
+    let mut options = fixture("grace-tree");
+    // Four seconds exceeds the complete three-second pre-close observation
+    // budget below. A fifteen-second shutdown still gives it a five-second
+    // grace phase in which to finish naturally.
+    options.shutdown_timeout = Duration::from_secs(15);
+    options = options
+        .env("TTRY_SIGNAL_MARKER", completion_marker.as_os_str())
+        .env("TTRY_GRACE_DELAY", "4");
+    let session = TuiSession::launch(options).unwrap();
+    session
+        .wait_for_text("DESCENDANT_PID=", Duration::from_secs(2))
+        .unwrap();
+    let descendant = session
+        .screen()
+        .text()
+        .split("DESCENDANT_PID=")
+        .nth(1)
+        .and_then(|suffix| suffix.split_whitespace().next())
+        .and_then(|value| value.parse::<i32>().ok())
+        .expect("fixture should print its descendant PID");
+    assert_eq!(
+        nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(descendant))).unwrap(),
+        nix::unistd::Pid::from_raw(session.process().process_group_id().unwrap())
+    );
+    expect(session.process().clone())
+        .timeout(Duration::from_secs(1))
+        .to_have_exited_with_code(0)
+        .unwrap();
+    assert!(nix::sys::signal::kill(nix::unistd::Pid::from_raw(descendant), None).is_ok());
+
+    session.close().unwrap();
+    let completion = std::fs::read_to_string(&completion_marker).unwrap_or_else(|error| {
+        panic!(
+            "missing descendant completion marker: {error}; alive={}; events={:?}",
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(descendant), None).is_ok(),
+            session.process().recent_events()
+        )
+    });
+    assert_eq!(completion, "natural");
+}
+
+#[cfg(unix)]
+#[test]
+fn cached_exit_is_rechecked_and_reaped_after_descendants_finish() {
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+
+    let temp = tempfile::tempdir().unwrap();
+    let completion_marker = temp.path().join("cached-reap-completion");
+    let mut options = fixture("grace-tree");
+    options.shutdown_timeout = Duration::from_secs(3);
+    options = options
+        .env("TTRY_SIGNAL_MARKER", completion_marker.as_os_str())
+        .env("TTRY_GRACE_DELAY", "0.6");
+    let session = TuiSession::launch(options).unwrap();
+    session
+        .wait_for_text("DESCENDANT_PID=", Duration::from_secs(2))
+        .unwrap();
+    let leader = Pid::from_raw(session.process().process_id().unwrap() as i32);
+    expect(session.process().clone())
+        .timeout(Duration::from_secs(1))
+        .to_have_exited_with_code(0)
+        .unwrap();
+    assert!(
+        kill(leader, None).is_ok(),
+        "the exited leader must reserve its PGID while a descendant is live"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !completion_marker.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        std::fs::read_to_string(completion_marker).unwrap(),
+        "natural"
+    );
+    assert!(matches!(
+        session.process().state().unwrap(),
+        ProcessState::Exited(_)
+    ));
+    assert!(
+        kill(leader, None).is_err(),
+        "a later state query must reap the cached exit once the group is empty"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn exited_leader_still_sends_term_to_live_descendants() {
+    let temp = tempfile::tempdir().unwrap();
+    let marker = temp.path().join("term-cleanup");
+    let mut options = fixture("term-tree");
+    options.shutdown_timeout = Duration::from_millis(900);
+    options = options.env("TTRY_SIGNAL_MARKER", marker.as_os_str());
+    let session = TuiSession::launch(options).unwrap();
+    session
+        .wait_for_text("TERM_DESCENDANT_PID=", Duration::from_secs(2))
+        .unwrap();
+    expect(session.process().clone())
+        .timeout(Duration::from_secs(1))
+        .to_have_exited_with_code(0)
+        .unwrap();
+
+    session.close().unwrap();
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "term");
+}
+
+#[cfg(unix)]
+#[test]
+fn exited_leader_still_offers_eof_to_interactive_descendants() {
+    let temp = tempfile::tempdir().unwrap();
+    let marker = temp.path().join("eof-cleanup");
+    let mut options = fixture("eof-tree");
+    options.shutdown_timeout = Duration::from_millis(900);
+    options = options.env("TTRY_SIGNAL_MARKER", marker.as_os_str());
+    let session = TuiSession::launch(options).unwrap();
+    session
+        .wait_for_text("EOF_DESCENDANT_PID=", Duration::from_secs(2))
+        .unwrap();
+    expect(session.process().clone())
+        .timeout(Duration::from_secs(1))
+        .to_have_exited_with_code(0)
+        .unwrap();
+
+    session.close().unwrap();
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "eof");
 }

@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
+use crate::process::ProcessState;
 use crate::session::{LaunchOptions, TuiSession};
 use crate::{Error, Result};
 
@@ -98,6 +99,15 @@ impl Config {
                     message: format!("expect_text for test `{}` must not be empty", test.name),
                 });
             }
+            if test.allow_running && (test.expect_exit || test.expect_exit_code.is_some()) {
+                return Err(Error::Config {
+                    path: path.to_path_buf(),
+                    message: format!(
+                        "allow_running cannot be combined with expect_exit or expect_exit_code for test `{}`",
+                        test.name
+                    ),
+                });
+            }
         }
         Ok(config)
     }
@@ -115,6 +125,11 @@ pub struct ConfiguredTest {
     pub rows: Option<u16>,
     pub input: Option<String>,
     pub expect_text: Option<String>,
+    /// Opt out of the default successful-exit assertion after screen checks.
+    /// Intended for interactive TUIs that are stopped by test cleanup. An
+    /// immediately observable failed exit is still rejected.
+    #[serde(default)]
+    pub allow_running: bool,
     /// Wait for any process exit. `expect_exit_code` implies this and also
     /// checks the exact code.
     pub expect_exit: bool,
@@ -420,11 +435,24 @@ pub fn run_config(config: Config, options: RunOptions) -> RunReport {
         let group = configured.group.clone();
         let skip = configured.skip;
         let focus = configured.focus;
+        let timeout_context = format!("running configured test `{}`", configured.name);
         let mut test = TestCase::new(name, move |context| {
+            let deadline = Instant::now() + test_timeout;
+            let remaining = || {
+                let duration = deadline.saturating_duration_since(Instant::now());
+                if duration.is_zero() {
+                    Err(Error::Timeout {
+                        timeout: test_timeout,
+                        context: timeout_context.clone(),
+                    })
+                } else {
+                    Ok(duration)
+                }
+            };
             let mut launch = LaunchOptions::new(configured.command)
                 .args(configured.args)
                 .size(configured.cols.unwrap_or(80), configured.rows.unwrap_or(24));
-            launch.startup_timeout = test_timeout;
+            launch.startup_timeout = remaining()?;
             launch.shutdown_timeout = Duration::from_millis(600);
             if let Some(cwd) = configured.cwd {
                 launch = launch.cwd(cwd);
@@ -434,18 +462,30 @@ pub fn run_config(config: Config, options: RunOptions) -> RunReport {
                 session.keyboard().paste(&input)?;
             }
             if let Some(expected) = configured.expect_text {
-                session.wait_for_text(&expected, test_timeout)?;
+                session.wait_for_text(&expected, remaining()?)?;
             }
             if let Some(code) = configured.expect_exit_code {
                 session
                     .expect_process()
-                    .timeout(test_timeout)
+                    .timeout(remaining()?)
                     .to_have_exited_with_code(code)?;
             } else if configured.expect_exit {
                 session
                     .expect_process()
-                    .timeout(test_timeout)
+                    .timeout(remaining()?)
                     .to_have_exited()?;
+            } else if !configured.allow_running {
+                session
+                    .expect_process()
+                    .timeout(remaining()?)
+                    .to_have_exited_with_code(0)?;
+            } else if let ProcessState::Exited(status) = session.process().state()? {
+                // `allow_running` permits an interactive process to remain
+                // alive; it does not turn an already-observable crash into a
+                // passing test. A clean exit is also acceptable.
+                if status.code != Some(0) {
+                    return Err(Error::ProcessExited(status.to_string()));
+                }
             }
             Ok(())
         });
@@ -526,6 +566,17 @@ mod tests {
         ));
     }
     #[test]
+    fn legacy_config_without_allow_running_uses_the_safe_default() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(
+            file.path(),
+            "[[tests]]\nname = 'legacy'\ncommand = 'true'\n",
+        )
+        .unwrap();
+        let config = Config::load(file.path()).unwrap();
+        assert!(!config.tests[0].allow_running);
+    }
+    #[test]
     fn zero_configured_dimensions_are_rejected() {
         let file = tempfile::NamedTempFile::new().unwrap();
         fs::write(
@@ -592,12 +643,62 @@ mod tests {
                 command: "/bin/sh".into(),
                 args: vec!["-c".into(), "printf 'READY\\r\\n'; sleep 2".into()],
                 expect_text: Some("READY".into()),
+                allow_running: true,
                 ..ConfiguredTest::default()
             }],
             ..Config::default()
         };
         let report = run_config(config, RunOptions::default());
         assert_eq!((report.passed, report.failed), (1, 0), "{report:?}");
+    }
+    #[cfg(unix)]
+    #[test]
+    fn allow_running_rejects_a_nonzero_exit_observed_after_the_text_check() {
+        let config = Config {
+            timeout_ms: 1_000,
+            tests: vec![ConfiguredTest {
+                name: "crashed interactive tui".into(),
+                command: "/bin/sh".into(),
+                // The leader exits before its descendant emits the expected
+                // text, making the failed status deterministic at the
+                // allow_running state check.
+                args: vec![
+                    "-c".into(),
+                    "(sleep 0.05; printf 'READY\\r\\n') & exit 7".into(),
+                ],
+                expect_text: Some("READY".into()),
+                allow_running: true,
+                ..ConfiguredTest::default()
+            }],
+            ..Config::default()
+        };
+        let report = run_config(config, RunOptions::default());
+        assert_eq!((report.passed, report.failed), (0, 1), "{report:?}");
+        assert!(matches!(
+            &report.tests[0].status,
+            TestStatus::Failed(message) if message.contains("exit code 7")
+        ));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn configured_text_check_rejects_a_later_nonzero_exit_by_default() {
+        let config = Config {
+            timeout_ms: 1_000,
+            tests: vec![ConfiguredTest {
+                name: "crashing command".into(),
+                command: "/bin/sh".into(),
+                args: vec!["-c".into(), "printf 'READY\\r\\n'; exit 7".into()],
+                expect_text: Some("READY".into()),
+                ..ConfiguredTest::default()
+            }],
+            ..Config::default()
+        };
+        let report = run_config(config, RunOptions::default());
+        assert_eq!((report.passed, report.failed), (0, 1), "{report:?}");
+        assert!(matches!(
+            &report.tests[0].status,
+            TestStatus::Failed(message) if message.contains("exit code 7")
+        ));
     }
     #[test]
     fn snapshot_update_mode_is_available_through_test_context() {

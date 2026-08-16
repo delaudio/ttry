@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -77,11 +77,99 @@ struct SessionInner {
     process: PtyProcess,
     keyboard: Keyboard,
     screen: Screen,
+    reader: Mutex<ReaderLifecycle>,
+    reader_shutdown_timeout: Duration,
+}
+
+enum ReaderLifecycle {
+    Running(thread::JoinHandle<()>),
+    Joined,
+    Panicked,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReaderJoinError {
+    Timeout(Duration),
+    Panicked,
+}
+
+impl std::fmt::Display for ReaderJoinError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Timeout(timeout) => {
+                write!(formatter, "PTY reader did not stop within {timeout:?}")
+            }
+            Self::Panicked => write!(formatter, "PTY reader thread panicked"),
+        }
+    }
+}
+
+fn join_reader_until(
+    reader: &Mutex<ReaderLifecycle>,
+    timeout: Duration,
+) -> std::result::Result<(), ReaderJoinError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let mut lifecycle = reader.lock().expect("reader lock poisoned");
+        match &*lifecycle {
+            ReaderLifecycle::Joined => return Ok(()),
+            ReaderLifecycle::Panicked => {
+                return Err(ReaderJoinError::Panicked);
+            }
+            ReaderLifecycle::Running(handle) if handle.is_finished() => {
+                // The mutex remains held for this nonblocking join, so no
+                // intermediate lifecycle state can become observable.
+                let current = std::mem::replace(&mut *lifecycle, ReaderLifecycle::Joined);
+                let ReaderLifecycle::Running(handle) = current else {
+                    unreachable!();
+                };
+                // is_finished guarantees this join will not wait for thread
+                // execution.
+                if handle.join().is_err() {
+                    *lifecycle = ReaderLifecycle::Panicked;
+                    return Err(ReaderJoinError::Panicked);
+                }
+                return Ok(());
+            }
+            ReaderLifecycle::Running(_) => {}
+        }
+        drop(lifecycle);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(ReaderJoinError::Timeout(timeout));
+        }
+        thread::sleep(Duration::from_millis(5).min(remaining));
+    }
 }
 
 impl Drop for SessionInner {
     fn drop(&mut self) {
         let _ = self.process.close();
+        // Drop cannot report reader failures, but it still gives the reader a
+        // bounded opportunity to finish so a just-completed thread is joined
+        // instead of detached.
+        let _ = join_reader_until(&self.reader, self.reader_shutdown_timeout);
+    }
+}
+
+impl SessionInner {
+    fn close(&self) -> Result<()> {
+        self.process.close()?;
+        // Process cleanup is the close contract. PTY implementations can
+        // delay read-side EOF even after every child has gone, so a bounded
+        // reader join is best effort and must not turn successful process
+        // cleanup into a failure. Preserve diagnostics in the event log.
+        match join_reader_until(&self.reader, self.reader_shutdown_timeout) {
+            Ok(()) => {}
+            Err(ReaderJoinError::Timeout(timeout)) => self.process.record_event(format!(
+                "PTY reader cleanup incomplete: {}",
+                ReaderJoinError::Timeout(timeout)
+            )),
+            Err(ReaderJoinError::Panicked) => {
+                return Err(Error::Runner(ReaderJoinError::Panicked.to_string()));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -116,6 +204,7 @@ impl TuiSession {
             });
         }
         let startup_timeout = options.startup_timeout;
+        let shutdown_timeout = options.shutdown_timeout;
         let mut pty_options = PtyOptions::new(options.command);
         pty_options.args = options.args;
         pty_options.cwd = options.cwd;
@@ -123,7 +212,7 @@ impl TuiSession {
         pty_options.term = options.term;
         pty_options.cols = options.cols;
         pty_options.rows = options.rows;
-        pty_options.shutdown_timeout = options.shutdown_timeout;
+        pty_options.shutdown_timeout = shutdown_timeout;
         let startup_started = Instant::now();
         let spawned = PtyProcess::spawn(pty_options);
         if startup_started.elapsed() > startup_timeout {
@@ -140,7 +229,7 @@ impl TuiSession {
         let screen = terminal.screen();
         let thread_screen = screen.clone();
         let thread_process = process.clone();
-        thread::Builder::new()
+        let reader = thread::Builder::new()
             .name("ttry-pty-reader".into())
             .spawn(move || {
                 if let Err(error) = ingest_pty_output(reader.as_mut(), &mut terminal) {
@@ -156,6 +245,8 @@ impl TuiSession {
                 process,
                 keyboard,
                 screen,
+                reader: Mutex::new(ReaderLifecycle::Running(reader)),
+                reader_shutdown_timeout: shutdown_timeout,
             }),
         })
     }
@@ -180,7 +271,7 @@ impl TuiSession {
         self.inner.screen.resize(cols, rows)
     }
     pub fn close(&self) -> Result<()> {
-        self.inner.process.close()
+        self.inner.close()
     }
     pub fn expect(&self, locator: Locator) -> LocatorExpect {
         LocatorExpect::with_process(locator, self.inner.process.clone())
@@ -256,5 +347,52 @@ mod tests {
         let mut terminal = Terminal::new(10, 1).unwrap();
         ingest_pty_output(&mut reader, &mut terminal).unwrap();
         assert_eq!(terminal.screen().text(), "ready");
+    }
+
+    #[test]
+    fn reader_join_timeout_is_bounded_and_retryable() {
+        let reader = Mutex::new(ReaderLifecycle::Running(thread::spawn(|| {
+            thread::sleep(Duration::from_millis(80));
+        })));
+        let started = Instant::now();
+        assert!(matches!(
+            join_reader_until(&reader, Duration::from_millis(10)),
+            Err(ReaderJoinError::Timeout(timeout)) if timeout == Duration::from_millis(10)
+        ));
+        assert!(started.elapsed() < Duration::from_millis(60));
+        thread::sleep(Duration::from_millis(90));
+        join_reader_until(&reader, Duration::from_millis(10)).unwrap();
+    }
+
+    #[test]
+    fn reader_panic_remains_visible_to_later_close_attempts() {
+        let reader = Mutex::new(ReaderLifecycle::Running(thread::spawn(|| {
+            panic!("reader failed");
+        })));
+        for _ in 0..2 {
+            assert!(matches!(
+                join_reader_until(&reader, Duration::from_secs(1)),
+                Err(ReaderJoinError::Panicked)
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_session_close_reports_a_reader_panic() {
+        let session = TuiSession::launch(
+            LaunchOptions::new("/bin/sh")
+                .args(["-c", "exit 0"])
+                .size(20, 2),
+        )
+        .unwrap();
+        session.inner.process.close().unwrap();
+        join_reader_until(&session.inner.reader, Duration::from_secs(1)).unwrap();
+        *session.inner.reader.lock().expect("reader lock poisoned") = ReaderLifecycle::Panicked;
+
+        assert!(matches!(
+            session.close(),
+            Err(Error::Runner(message)) if message.contains("PTY reader thread panicked")
+        ));
     }
 }
