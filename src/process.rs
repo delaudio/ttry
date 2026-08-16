@@ -17,6 +17,20 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 
 use crate::{Error, Result};
 
+fn terminate_spawned_child(child: &mut Box<dyn Child + Send + Sync>, process_group: Option<i32>) {
+    #[cfg(unix)]
+    if let Some(process_group) = process_group {
+        let _ = killpg(Pid::from_raw(process_group), Signal::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    let _ = process_group;
+    let _ = child.kill();
+    // This helper is used only after the child has successfully spawned but
+    // before ownership can move into ProcessInner. Reap synchronously so an
+    // error constructing the remaining PTY handles cannot leak a child.
+    let _ = child.wait();
+}
+
 #[derive(Clone, Debug)]
 pub struct PtyOptions {
     pub command: OsString,
@@ -166,7 +180,7 @@ impl PtyProcess {
             match (child_pid, group_leader) {
                 (Some(pid), Some(group)) if pid == group => Some(group),
                 (pid, group) => {
-                    let _ = child.kill();
+                    terminate_spawned_child(&mut child, None);
                     return Err(Error::Launch {
                         command: command_display.clone(),
                         source: std::io::Error::other(format!(
@@ -178,18 +192,29 @@ impl PtyProcess {
                 }
             }
         };
+        #[cfg(not(unix))]
+        let process_group = None;
         drop(pair.slave);
-        let reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|source| Error::Launch {
-                command: command_display.clone(),
-                source: source.into(),
-            })?;
-        let writer = pair.master.take_writer().map_err(|source| Error::Launch {
-            command: command_display.clone(),
-            source: source.into(),
-        })?;
+        let reader = match pair.master.try_clone_reader() {
+            Ok(reader) => reader,
+            Err(source) => {
+                terminate_spawned_child(&mut child, process_group);
+                return Err(Error::Launch {
+                    command: command_display.clone(),
+                    source: source.into(),
+                });
+            }
+        };
+        let writer = match pair.master.take_writer() {
+            Ok(writer) => writer,
+            Err(source) => {
+                terminate_spawned_child(&mut child, process_group);
+                return Err(Error::Launch {
+                    command: command_display.clone(),
+                    source: source.into(),
+                });
+            }
+        };
         let process = Self {
             inner: Arc::new(ProcessInner {
                 master: Mutex::new(pair.master),
@@ -439,7 +464,6 @@ impl Drop for ProcessInner {
         }
         let child = self.child.get_mut().expect("child lock poisoned");
         if matches!(child.try_wait(), Ok(Some(_))) {
-            #[cfg(not(unix))]
             return;
         }
 
@@ -451,16 +475,7 @@ impl Drop for ProcessInner {
         let deadline = Instant::now() + self.shutdown_timeout;
         loop {
             let leader_exited = matches!(child.try_wait(), Ok(Some(_)));
-            #[cfg(unix)]
-            let group_exited = self.process_group.is_none_or(|process_group| {
-                matches!(
-                    killpg(Pid::from_raw(process_group), None::<Signal>),
-                    Err(Errno::ESRCH)
-                )
-            });
-            #[cfg(not(unix))]
-            let group_exited = true;
-            if leader_exited && group_exited {
+            if leader_exited {
                 break;
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
