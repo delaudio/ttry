@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
+use crate::error::validate_timeout;
 use crate::process::ProcessState;
 use crate::screen::validate_dimensions;
 use crate::session::{LaunchOptions, TuiSession};
@@ -402,13 +403,11 @@ impl Runner {
                 continue;
             }
             let timeout = test.timeout.unwrap_or(self.timeout);
-            if timeout.is_zero() {
+            if let Err(error) = validate_timeout(timeout, "timeout") {
                 report.failed += 1;
                 report.tests.push(TestResult {
                     name,
-                    status: TestStatus::Failed(
-                        Error::InvalidTimeout { field: "timeout" }.to_string(),
-                    ),
+                    status: TestStatus::Failed(error.to_string()),
                     duration: Duration::ZERO,
                 });
                 continue;
@@ -541,6 +540,21 @@ pub fn run_config(config: Config, options: RunOptions) -> RunReport {
         .clone()
         .unwrap_or_else(|| config.reporter.clone());
     let cli_timeout = options.timeout;
+    if let Some(cli_timeout) = cli_timeout {
+        if let Err(error) = validate_timeout(cli_timeout, "timeout") {
+            return RunReport {
+                reporter: selected_reporter,
+                selected: 1,
+                failed: 1,
+                tests: vec![TestResult {
+                    name: "configuration".into(),
+                    status: TestStatus::Failed(error.to_string()),
+                    duration: Duration::ZERO,
+                }],
+                ..RunReport::default()
+            };
+        }
+    }
     let timeout = cli_timeout.unwrap_or(Duration::from_millis(config.timeout_ms));
     let mut runner = Runner::new(timeout).update_snapshots(options.update_snapshots);
     for configured in config.tests {
@@ -1154,7 +1168,7 @@ mod tests {
         assert_eq!(report.tests[0].name, name);
     }
     #[test]
-    fn typed_runner_rejects_zero_timeouts_before_running_test_bodies() {
+    fn typed_runner_rejects_invalid_timeouts_before_running_test_bodies() {
         let body_ran = Arc::new(AtomicBool::new(false));
         let marker = Arc::clone(&body_ran);
         let mut runner = Runner::new(Duration::ZERO);
@@ -1175,6 +1189,51 @@ mod tests {
         let mut runner = Runner::new(Duration::from_secs(1));
         runner.register(TestCase::new("zero override", |_| Ok(())).timeout(Duration::ZERO));
         assert_eq!(runner.run(None).failed, 1);
+
+        let body_ran = Arc::new(AtomicBool::new(false));
+        let marker = Arc::clone(&body_ran);
+        let mut runner = Runner::new(Duration::MAX);
+        runner.register(TestCase::new("excessive default", move |_| {
+            marker.store(true, Ordering::Release);
+            Ok(())
+        }));
+        let report = runner.run(None);
+        assert_eq!(report.failed, 1);
+        assert!(!body_ran.load(Ordering::Acquire));
+        assert!(matches!(
+            &report.tests[0].status,
+            TestStatus::Failed(message) if message.contains("at most 24 hours")
+        ));
+
+        let mut runner = Runner::new(Duration::from_secs(1));
+        runner.register(TestCase::new("excessive override", |_| Ok(())).timeout(Duration::MAX));
+        assert_eq!(runner.run(None).failed, 1);
+    }
+    #[test]
+    fn run_config_rejects_invalid_programmatic_timeout() {
+        let config = Config {
+            tests: vec![ConfiguredTest {
+                name: "must not run".into(),
+                command: "unused".into(),
+                ..ConfiguredTest::default()
+            }],
+            ..Config::default()
+        };
+
+        let report = run_config(
+            config,
+            RunOptions {
+                timeout: Some(Duration::MAX),
+                ..RunOptions::default()
+            },
+        );
+
+        assert_eq!((report.selected, report.failed), (1, 1));
+        assert!(matches!(
+            &report.tests[0],
+            TestResult { name, status: TestStatus::Failed(message), .. }
+                if name == "configuration" && message.contains("at most 24 hours")
+        ));
     }
     #[cfg(unix)]
     #[test]
