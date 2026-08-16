@@ -1032,6 +1032,28 @@ fn normalize_status(status: portable_pty::ExitStatus) -> ExitStatus {
     }
 }
 
+#[cfg(unix)]
+fn process_group_may_be_running(process_group: i32) -> bool {
+    match killpg(Pid::from_raw(process_group), None::<Signal>) {
+        Err(Errno::ESRCH) => false,
+        Ok(()) => {
+            #[cfg(any(target_vendor = "apple", target_os = "linux"))]
+            return !matches!(
+                process_group_liveness(process_group),
+                Ok(GroupLiveness::Empty)
+            );
+            #[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
+            true
+        }
+        #[cfg(target_vendor = "apple")]
+        Err(Errno::EPERM) => !matches!(
+            process_group_liveness(process_group),
+            Ok(GroupLiveness::Empty)
+        ),
+        Err(_) => true,
+    }
+}
+
 impl Drop for ProcessInner {
     fn drop(&mut self) {
         if self.cleanup_complete.load(Ordering::Relaxed) {
@@ -1045,14 +1067,20 @@ impl Drop for ProcessInner {
         if let Some(process_group) = self.process_group {
             let _ = killpg(Pid::from_raw(process_group), Signal::SIGKILL);
         }
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            return;
+        let mut leader_exited = matches!(child.try_wait(), Ok(Some(_)));
+        if !leader_exited {
+            let _ = child.kill();
         }
-        let _ = child.kill();
         let deadline = Instant::now() + self.shutdown_timeout;
         loop {
-            let leader_exited = matches!(child.try_wait(), Ok(Some(_)));
-            if leader_exited {
+            leader_exited |= matches!(child.try_wait(), Ok(Some(_)));
+            #[cfg(unix)]
+            let group_exited = self
+                .process_group
+                .is_none_or(|group| !process_group_may_be_running(group));
+            #[cfg(not(unix))]
+            let group_exited = true;
+            if leader_exited && group_exited {
                 break;
             }
             let remaining = deadline.saturating_duration_since(Instant::now());

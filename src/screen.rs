@@ -34,9 +34,15 @@ pub struct Cell {
 
 impl Default for Cell {
     fn default() -> Self {
+        Self::blank(Style::default())
+    }
+}
+
+impl Cell {
+    fn blank(style: Style) -> Self {
         Self {
             text: " ".into(),
-            style: Style::default(),
+            style,
             continuation: false,
         }
     }
@@ -102,7 +108,7 @@ impl Buffer {
         let width = self.cols as usize;
         self.cells.rotate_left(width);
         let start = self.cells.len().saturating_sub(width);
-        self.cells[start..].fill(Cell::default());
+        self.cells[start..].fill(Cell::blank(self.style));
     }
 
     fn newline(&mut self) {
@@ -172,13 +178,14 @@ impl Buffer {
     }
 
     fn clear_wide_glyph_at(&mut self, index: usize) {
+        let blank = Cell::blank(self.style);
         if self.cells[index].continuation {
             if index.checked_sub(1) == self.last_printed {
                 self.last_printed = None;
             }
-            self.cells[index] = Cell::default();
+            self.cells[index] = blank.clone();
             if index > 0 {
-                self.cells[index - 1] = Cell::default();
+                self.cells[index - 1] = blank;
             }
             return;
         }
@@ -190,8 +197,8 @@ impl Buffer {
             if self.last_printed == Some(index) {
                 self.last_printed = None;
             }
-            self.cells[index] = Cell::default();
-            self.cells[next] = Cell::default();
+            self.cells[index] = blank.clone();
+            self.cells[next] = blank;
         }
     }
 
@@ -210,11 +217,10 @@ impl Buffer {
         {
             self.last_printed = None;
         }
-        let changed = self.cells[start..end]
-            .iter()
-            .any(|cell| *cell != Cell::default());
+        let blank = Cell::blank(self.style);
+        let changed = self.cells[start..end].iter().any(|cell| *cell != blank);
         if changed {
-            self.cells[start..end].fill(Cell::default());
+            self.cells[start..end].fill(blank);
         }
         changed
     }
@@ -866,6 +872,18 @@ mod tests {
         assert!(terminal.screen().cell(0, 0).unwrap().style.bold);
         terminal.advance(b"\x1b[2Jx\x1b[?1049l");
         assert!(terminal.screen().text().starts_with("primary"));
+    }
+
+    #[test]
+    fn erase_uses_the_active_style_for_blank_cells() {
+        let mut terminal = Terminal::new(3, 1).unwrap();
+        terminal.advance(b"abc\r\x1b[44;1m\x1b[2K");
+        for col in 0..3 {
+            let cell = terminal.screen().cell(col, 0).unwrap();
+            assert_eq!(cell.text, " ");
+            assert_eq!(cell.style.background, Color::Indexed(4));
+            assert!(cell.style.bold);
+        }
     }
 
     #[test]

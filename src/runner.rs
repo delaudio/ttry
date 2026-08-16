@@ -253,6 +253,7 @@ fn combine_test_and_cleanup(body: Result<()>, cleanup: Result<()>) -> Result<()>
 
 type TestBody = Box<dyn FnOnce(&mut TestContext) -> Result<()> + Send>;
 const WORKER_CANCELLATION_GRACE: Duration = Duration::from_millis(100);
+const ALLOW_RUNNING_EXIT_GRACE: Duration = Duration::from_millis(50);
 
 pub struct TestCase {
     name: String,
@@ -505,12 +506,23 @@ pub fn run_config(config: Config, options: RunOptions) -> RunReport {
                     .expect_process()
                     .timeout(remaining()?)
                     .to_have_exited_with_code(0)?;
-            } else if let ProcessState::Exited(status) = session.process().state()? {
+            } else {
                 // `allow_running` permits an interactive process to remain
-                // alive; it does not turn an already-observable crash into a
-                // passing test. A clean exit is also acceptable.
-                if status.code != Some(0) {
-                    return Err(Error::ProcessExited(status.to_string()));
+                // alive, but watches a short bounded grace window so an
+                // immediate post-assertion crash cannot race a single sample.
+                let exit_deadline = Instant::now() + ALLOW_RUNNING_EXIT_GRACE.min(remaining()?);
+                loop {
+                    if let ProcessState::Exited(status) = session.process().state()? {
+                        if status.code != Some(0) {
+                            return Err(Error::ProcessExited(status.to_string()));
+                        }
+                        break;
+                    }
+                    let remaining = exit_deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(1).min(remaining));
                 }
             }
             Ok(())
@@ -703,6 +715,31 @@ mod tests {
         assert!(matches!(
             &report.tests[0].status,
             TestStatus::Failed(message) if message.contains("exit code 7")
+        ));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn allow_running_catches_a_crash_just_after_the_text_check() {
+        let config = Config {
+            timeout_ms: 1_000,
+            tests: vec![ConfiguredTest {
+                name: "slightly delayed crash".into(),
+                command: "/bin/sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "printf 'READY\\r\\n'; sleep 0.02; exit 9".into(),
+                ],
+                expect_text: Some("READY".into()),
+                allow_running: true,
+                ..ConfiguredTest::default()
+            }],
+            ..Config::default()
+        };
+        let report = run_config(config, RunOptions::default());
+        assert_eq!((report.passed, report.failed), (0, 1), "{report:?}");
+        assert!(matches!(
+            &report.tests[0].status,
+            TestStatus::Failed(message) if message.contains("exit code 9")
         ));
     }
     #[cfg(unix)]

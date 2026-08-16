@@ -107,8 +107,8 @@ serially and support grouping, skip/focus, initial `cols`/`rows`, input,
 expected text, expected exit, expected exit code, and per-test timeouts.
 Configured commands must exit successfully by default, including after a
 screen assertion. Set `allow_running = true` for an interactive TUI that
-should pass while cleanup stops it; an immediately observable non-zero exit
-still fails, using a best-effort nonblocking check. Set `expect_exit = true` to accept any exit status, or
+should pass while cleanup stops it; a non-zero exit during a short bounded
+post-assertion grace window still fails. Set `expect_exit = true` to accept any exit status, or
 `expect_exit_code` to require an exact status. CLI options override
 configuration values:
 
