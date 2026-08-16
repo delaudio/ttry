@@ -32,6 +32,7 @@ pub enum Key {
 
 impl Key {
     pub fn parse(expression: &str) -> Result<Self> {
+        let original_expression = expression;
         if expression.is_empty() {
             return Err(Error::InvalidKey(expression.into()));
         }
@@ -43,6 +44,10 @@ impl Key {
         if expression != " " && expression.trim().is_empty() {
             return Err(Error::InvalidKey(expression.into()));
         }
+        if expression == " " {
+            return Ok(Key::Text(expression.into()));
+        }
+        let expression = expression.trim();
         if expression == "+" {
             return Ok(Key::Text(expression.into()));
         }
@@ -54,7 +59,7 @@ impl Key {
         }
         let original_parts: Vec<&str> = expression.trim().split('+').collect();
         if original_parts.iter().any(|part| part.is_empty()) {
-            return Err(Error::InvalidKey(expression.into()));
+            return Err(Error::InvalidKey(original_expression.into()));
         }
         let normalized_parts: Vec<String> = original_parts
             .iter()
@@ -102,14 +107,14 @@ impl Key {
                 let number = name[1..].parse::<u8>().unwrap();
                 if !(1..=12).contains(&number) {
                     return Err(Error::UnsupportedKey(
-                        expression.into(),
+                        original_expression.into(),
                         "only F1 through F12 are supported".into(),
                     ));
                 }
                 Key::Function(number)
             }
             name if name.chars().count() == 1 => Key::Text(original_key.into()),
-            _ => return Err(Error::InvalidKey(expression.into())),
+            _ => return Err(Error::InvalidKey(original_expression.into())),
         };
         if ctrl || alt || shift {
             let modified = Key::Modified {
@@ -120,7 +125,7 @@ impl Key {
             };
             match modified.encode() {
                 Err(Error::UnsupportedKey(_, reason)) => {
-                    Err(Error::UnsupportedKey(expression.into(), reason))
+                    Err(Error::UnsupportedKey(original_expression.into(), reason))
                 }
                 Err(error) => Err(error),
                 Ok(_) => Ok(modified),
@@ -303,9 +308,12 @@ mod tests {
         let cases = [
             ("a", b"a".as_slice()),
             ("enter", b"\r"),
+            (" enter", b"\r"),
+            ("enter ", b"\r"),
             ("escape", b"\x1b"),
             ("delete", b"\x1b[3~"),
             ("up", b"\x1b[A"),
+            (" up ", b"\x1b[A"),
             ("f12", b"\x1b[24~"),
         ];
         for (input, expected) in cases {

@@ -573,20 +573,23 @@ pub fn run_config(config: Config, options: RunOptions) -> RunReport {
                 session.wait_for_text(&expected, remaining()?)?;
             }
             if let Some(code) = configured.expect_exit_code {
-                session
-                    .expect_process()
-                    .timeout(remaining()?)
-                    .to_have_exited_with_code(code)?;
+                expect_configured_exit(
+                    &session,
+                    Some(code),
+                    deadline,
+                    test_timeout,
+                    &timeout_context,
+                )?;
             } else if configured.expect_exit {
-                session
-                    .expect_process()
-                    .timeout(remaining()?)
-                    .to_have_exited()?;
+                expect_configured_exit(&session, None, deadline, test_timeout, &timeout_context)?;
             } else if !configured.allow_running {
-                session
-                    .expect_process()
-                    .timeout(remaining()?)
-                    .to_have_exited_with_code(0)?;
+                expect_configured_exit(
+                    &session,
+                    Some(0),
+                    deadline,
+                    test_timeout,
+                    &timeout_context,
+                )?;
             } else {
                 // `allow_running` requires an interactive process to remain
                 // alive through a short bounded grace window so an immediate
@@ -626,6 +629,41 @@ pub fn run_config(config: Config, options: RunOptions) -> RunReport {
     let mut report = runner.run(options.grep.as_deref());
     report.reporter = selected_reporter;
     report
+}
+
+fn expect_configured_exit(
+    session: &TuiSession,
+    expected_code: Option<i32>,
+    deadline: Instant,
+    timeout: Duration,
+    timeout_context: &str,
+) -> Result<()> {
+    // Always take one nonblocking sample before rejecting an exhausted test
+    // budget. A preceding output assertion may consume the final instant even
+    // though the child has already exited successfully.
+    if let ProcessState::Exited(status) = session.process().state()? {
+        if expected_code.is_none() || status.code == expected_code {
+            return Ok(());
+        }
+        return Err(Error::ProcessExited(format!(
+            "expected exit code {}, got {status}",
+            expected_code.expect("checked above")
+        )));
+    }
+
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(Error::Timeout {
+            timeout,
+            context: timeout_context.into(),
+        });
+    }
+    let expectation = session.expect_process().timeout(remaining);
+    if let Some(code) = expected_code {
+        expectation.to_have_exited_with_code(code)
+    } else {
+        expectation.to_have_exited()
+    }
 }
 
 #[cfg(test)]
@@ -995,6 +1033,27 @@ mod tests {
             &report.tests[0].status,
             TestStatus::Failed(message) if message.contains("exit code 7")
         ));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn configured_exit_samples_an_exited_process_after_the_deadline() {
+        let session =
+            TuiSession::launch(LaunchOptions::new("/bin/sh").args(["-c", "exit 0"])).unwrap();
+        let observation_deadline = Instant::now() + Duration::from_secs(1);
+        while !matches!(session.process().state().unwrap(), ProcessState::Exited(_)) {
+            assert!(Instant::now() < observation_deadline);
+            thread::yield_now();
+        }
+
+        let result = expect_configured_exit(
+            &session,
+            Some(0),
+            Instant::now(),
+            Duration::from_millis(10),
+            "regression test",
+        );
+
+        assert!(result.is_ok(), "{result:?}");
     }
     #[test]
     fn snapshot_update_mode_is_available_through_test_context() {
