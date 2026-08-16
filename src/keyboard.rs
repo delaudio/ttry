@@ -183,6 +183,12 @@ fn encode_modified(ctrl: bool, alt: bool, shift: bool, key: &Key) -> Result<Vec<
         if let Key::Text(text) = key {
             let mut chars = text.chars();
             if let (Some(ch), None) = (chars.next(), chars.next()) {
+                if !ch.is_ascii() {
+                    return Err(Error::UnsupportedKey(
+                        format!("{key:?}"),
+                        "Ctrl combinations are only supported for ASCII letters".into(),
+                    ));
+                }
                 let upper = ch.to_ascii_uppercase();
                 if upper.is_ascii_uppercase() {
                     if shift {
@@ -348,6 +354,12 @@ mod tests {
         assert!(matches!(
             Key::parse("ctrl+shift+c"),
             Err(Error::UnsupportedKey(expression, _)) if expression == "ctrl+shift+c"
+        ));
+        assert!(matches!(
+            Key::parse("ctrl+é"),
+            Err(Error::UnsupportedKey(expression, reason))
+                if expression == "ctrl+é"
+                    && reason == "Ctrl combinations are only supported for ASCII letters"
         ));
         assert!(matches!(
             Key::parse("shift+1"),

@@ -434,7 +434,16 @@ impl Runner {
                             .unwrap_or_default();
                         let worker_stopped =
                             match result_receiver.recv_timeout(WORKER_CANCELLATION_GRACE) {
-                                Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                Ok(body_result) => {
+                                    if let Err(error) = body_result {
+                                        diagnostic.push_str(&format!(
+                                            "; worker stopped after cancellation: {error}"
+                                        ));
+                                    }
+                                    let _ = worker.join();
+                                    true
+                                }
+                                Err(mpsc::RecvTimeoutError::Disconnected) => {
                                     let _ = worker.join();
                                     true
                                 }
@@ -1056,7 +1065,7 @@ mod tests {
         assert_eq!((report.passed, report.failed), (1, 0), "{report:?}");
     }
     #[test]
-    fn timeout_does_not_report_a_late_body_error() {
+    fn timeout_preserves_a_cooperative_late_body_error() {
         let mut runner = Runner::new(Duration::from_millis(20));
         runner.register(TestCase::new("diagnostic", |_| {
             std::thread::sleep(Duration::from_millis(50));
@@ -1067,7 +1076,8 @@ mod tests {
             &report.tests[0].status,
             TestStatus::Failed(message)
                 if message.contains("timed out")
-                    && !message.contains("specific assertion diagnostic")
+                    && message.contains("worker stopped after cancellation")
+                    && message.contains("specific assertion diagnostic")
         ));
     }
     #[cfg(unix)]
