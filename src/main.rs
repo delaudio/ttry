@@ -71,7 +71,6 @@ fn main() -> ExitCode {
                 RunOptions {
                     grep,
                     timeout: timeout.map(Duration::from_millis),
-                    reporter: Some(selected_reporter),
                     update_snapshots,
                 },
             );

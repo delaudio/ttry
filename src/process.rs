@@ -152,7 +152,7 @@ impl PtyProcess {
         for (key, value) in &options.env {
             command.env(key, value);
         }
-        let child = pair
+        let mut child = pair
             .slave
             .spawn_command(command)
             .map_err(|source| Error::Launch {
@@ -160,7 +160,24 @@ impl PtyProcess {
                 source: source.into(),
             })?;
         #[cfg(unix)]
-        let process_group = child.process_id().and_then(|pid| i32::try_from(pid).ok());
+        let process_group = {
+            let child_pid = child.process_id().and_then(|pid| i32::try_from(pid).ok());
+            let group_leader = pair.master.process_group_leader();
+            match (child_pid, group_leader) {
+                (Some(pid), Some(group)) if pid == group => Some(group),
+                (pid, group) => {
+                    let _ = child.kill();
+                    return Err(Error::Launch {
+                        command: command_display.clone(),
+                        source: std::io::Error::other(format!(
+                            "PTY child was not isolated as its process-group leader \
+                             (pid={pid:?}, pgid={group:?})"
+                        ))
+                        .into(),
+                    });
+                }
+            }
+        };
         drop(pair.slave);
         let reader = pair
             .master
@@ -235,6 +252,10 @@ impl PtyProcess {
             .lock()
             .expect("child lock poisoned")
             .process_id()
+    }
+    #[cfg(unix)]
+    pub fn process_group_id(&self) -> Option<i32> {
+        self.inner.process_group
     }
     pub fn recent_events(&self) -> Vec<String> {
         self.inner

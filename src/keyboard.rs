@@ -93,7 +93,6 @@ impl Key {
                 Key::Function(number)
             }
             name if name.chars().count() == 1 => Key::Text(original_key.into()),
-            _ if parts.len() == 1 => Key::Text(expression.into()),
             _ => return Err(Error::InvalidKey(expression.into())),
         };
         if ctrl || alt || shift {
@@ -273,6 +272,7 @@ mod tests {
     fn plus_and_space_are_printable_keys() {
         assert_eq!(Key::parse("+").unwrap().encode().unwrap(), b"+");
         assert_eq!(Key::parse(" ").unwrap().encode().unwrap(), b" ");
+        assert!(Key::parse("hello").is_err());
         assert!(Key::parse("  ").is_err());
         assert!(Key::parse("\t ").is_err());
     }

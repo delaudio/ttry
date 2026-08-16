@@ -139,6 +139,10 @@ fn cleanup_terminates_the_entire_process_group() {
     let mut options = fixture("tree");
     options.shutdown_timeout = Duration::from_millis(900);
     let session = TuiSession::launch(options).unwrap();
+    assert_eq!(
+        session.process().process_group_id(),
+        session.process().process_id().map(|pid| pid as i32)
+    );
     session
         .wait_for_text("DESCENDANT_PID=", Duration::from_secs(2))
         .unwrap();

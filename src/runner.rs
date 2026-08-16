@@ -151,7 +151,6 @@ impl RunReport {
 pub struct RunOptions {
     pub grep: Option<String>,
     pub timeout: Option<Duration>,
-    pub reporter: Option<Reporter>,
     pub update_snapshots: bool,
 }
 pub struct TestContext {
@@ -314,34 +313,20 @@ impl Runner {
             let timeout = test.timeout.unwrap_or(self.timeout);
             let sessions = Arc::new(Mutex::new(Vec::new()));
             let cancelled = Arc::new(AtomicBool::new(false));
-            let watchdog_sessions = Arc::clone(&sessions);
-            let watchdog_cancelled = Arc::clone(&cancelled);
-            let (finished_sender, finished_receiver) = mpsc::sync_channel(1);
-            let watchdog = thread::Builder::new()
-                .name(format!("ttry-watchdog-{name}"))
+            let worker_sessions = Arc::clone(&sessions);
+            let worker_cancelled = Arc::clone(&cancelled);
+            let update_snapshots = self.update_snapshots;
+            let (result_sender, result_receiver) = mpsc::sync_channel(1);
+            let worker = thread::Builder::new()
+                .name(format!("ttry-test-{name}"))
                 .spawn(move || {
-                    let timed_out = matches!(
-                        finished_receiver.recv_timeout(timeout),
-                        Err(mpsc::RecvTimeoutError::Timeout)
-                    );
-                    if timed_out {
-                        watchdog_cancelled.store(true, Ordering::Release);
-                    }
-                    // The watchdog is the sole cleanup owner. On a normal run
-                    // it starts after the body signals completion; on timeout
-                    // it closes PTYs immediately so blocked operations unwind.
-                    let cleanup = cleanup_sessions(&watchdog_sessions);
-                    (timed_out, cleanup)
-                });
-            let result = match watchdog {
-                Ok(watchdog) => {
                     let mut context = TestContext {
-                        sessions,
-                        cancelled,
-                        update_snapshots: self.update_snapshots,
+                        sessions: worker_sessions,
+                        cancelled: worker_cancelled,
+                        update_snapshots,
                     };
-                    let body_result = catch_unwind(AssertUnwindSafe(|| (test.body)(&mut context)));
-                    let body_result = match body_result {
+                    let result = catch_unwind(AssertUnwindSafe(|| (test.body)(&mut context)));
+                    let result = match result {
                         Ok(result) => result,
                         Err(payload) => {
                             let message = payload
@@ -352,33 +337,52 @@ impl Runner {
                             Err(Error::Runner(format!("test body panicked: {message}")))
                         }
                     };
-                    let _ = finished_sender.send(());
-                    match watchdog.join() {
-                        Ok((timed_out, cleanup_result)) => {
-                            let completed_result =
-                                combine_test_and_cleanup(body_result, cleanup_result);
-                            if timed_out {
-                                let diagnostic = completed_result
-                                    .err()
-                                    .map(|error| format!("; after cancellation: {error}"))
-                                    .unwrap_or_default();
-                                Err(Error::Timeout {
-                                    timeout,
-                                    context: format!(
-                                        "test `{name}` exceeded its timeout{diagnostic}"
-                                    ),
-                                })
-                            } else {
-                                completed_result
-                            }
-                        }
-                        Err(_) => Err(Error::Runner(format!(
-                            "watchdog for test `{name}` panicked"
-                        ))),
+                    let _ = result_sender.send(result);
+                });
+            let result = match worker {
+                Ok(worker) => match result_receiver.recv_timeout(timeout) {
+                    Ok(body_result) => {
+                        let cleanup_result = cleanup_sessions(&sessions);
+                        let _ = worker.join();
+                        combine_test_and_cleanup(body_result, cleanup_result)
                     }
-                }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        cancelled.store(true, Ordering::Release);
+                        let cleanup_result = cleanup_sessions(&sessions);
+                        // Cleanup often releases a blocked PTY assertion. Give
+                        // it a small bounded window to return its diagnostic;
+                        // otherwise detach the uncooperative Rust worker.
+                        let late_result =
+                            result_receiver.recv_timeout(Duration::from_millis(50)).ok();
+                        let diagnostic_result = match late_result {
+                            Some(body_result) => {
+                                let _ = worker.join();
+                                combine_test_and_cleanup(body_result, cleanup_result)
+                            }
+                            None => cleanup_result,
+                        };
+                        let diagnostic = diagnostic_result
+                            .err()
+                            .map(|error| format!("; after cancellation: {error}"))
+                            .unwrap_or_default();
+                        Err(Error::Timeout {
+                            timeout,
+                            context: format!("test `{name}` exceeded its timeout{diagnostic}"),
+                        })
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        let cleanup_result = cleanup_sessions(&sessions);
+                        let _ = worker.join();
+                        combine_test_and_cleanup(
+                            Err(Error::Runner(format!(
+                                "worker for test `{name}` stopped unexpectedly"
+                            ))),
+                            cleanup_result,
+                        )
+                    }
+                },
                 Err(error) => Err(Error::Runner(format!(
-                    "could not start watchdog for test `{name}`: {error}"
+                    "could not start worker for test `{name}`: {error}"
                 ))),
             };
             let duration = started.elapsed();
@@ -573,12 +577,12 @@ mod tests {
         assert!(observed.load(Ordering::Acquire));
     }
     #[test]
-    fn non_cooperative_timeout_waits_for_body_before_next_test() {
+    fn non_cooperative_timeout_does_not_block_the_next_test() {
         let reached_next_test = Arc::new(AtomicBool::new(false));
         let next_test_marker = Arc::clone(&reached_next_test);
         let mut runner = Runner::new(Duration::from_millis(20));
         runner.register(TestCase::new("slow", |_| {
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(Duration::from_secs(1));
             Ok(())
         }));
         runner.register(TestCase::new("next", move |_| {
@@ -589,7 +593,7 @@ mod tests {
         let report = runner.run(None);
         assert_eq!(report.failed, 1);
         assert_eq!(report.passed, 1);
-        assert!(started.elapsed() >= Duration::from_millis(150));
+        assert!(started.elapsed() < Duration::from_millis(500));
         assert!(reached_next_test.load(Ordering::Acquire));
     }
     #[test]
@@ -597,7 +601,7 @@ mod tests {
         let mut runner = Runner::new(Duration::from_secs(1));
         runner.register(
             TestCase::new("slow", |_| {
-                std::thread::sleep(Duration::from_millis(200));
+                std::thread::sleep(Duration::from_secs(1));
                 Ok(())
             })
             .timeout(Duration::from_millis(20)),
@@ -605,10 +609,10 @@ mod tests {
         let started = Instant::now();
         let report = runner.run(None);
         assert_eq!(report.failed, 1);
-        assert!(started.elapsed() >= Duration::from_millis(150));
+        assert!(started.elapsed() < Duration::from_millis(500));
     }
     #[test]
-    fn watchdog_preserves_a_specific_body_error() {
+    fn timeout_preserves_a_specific_body_error() {
         let mut runner = Runner::new(Duration::from_millis(20));
         runner.register(TestCase::new("diagnostic", |_| {
             std::thread::sleep(Duration::from_millis(50));
@@ -624,7 +628,7 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
-    fn watchdog_closes_a_session_to_unblock_the_test_body() {
+    fn timeout_closes_a_session_to_unblock_the_test_body() {
         let body_unblocked = Arc::new(AtomicBool::new(false));
         let marker = Arc::clone(&body_unblocked);
         let mut runner = Runner::new(Duration::from_millis(500));
