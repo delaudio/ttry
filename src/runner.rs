@@ -85,6 +85,12 @@ impl Config {
                     ),
                 });
             }
+            if test.expect_text.as_deref() == Some("") {
+                return Err(Error::Config {
+                    path: path.to_path_buf(),
+                    message: format!("expect_text for test `{}` must not be empty", test.name),
+                });
+            }
         }
         Ok(config)
     }
@@ -484,6 +490,19 @@ mod tests {
         fs::write(
             file.path(),
             "[[tests]]\nname = 'case'\ncommand = 'true'\ntimeout_ms = 0\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            Config::load(file.path()),
+            Err(Error::Config { .. })
+        ));
+    }
+    #[test]
+    fn empty_expected_text_is_rejected() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(
+            file.path(),
+            "[[tests]]\nname = 'case'\ncommand = 'true'\nexpect_text = ''\n",
         )
         .unwrap();
         assert!(matches!(

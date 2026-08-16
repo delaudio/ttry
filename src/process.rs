@@ -301,7 +301,8 @@ impl PtyProcess {
             .child
             .lock()
             .expect("child lock poisoned")
-            .kill()?;
+            .kill()
+            .map_err(|error| Error::Io(std::io::Error::other(error)))?;
         if self.wait_until_exit(self.inner.shutdown_timeout / 3) {
             self.inner.closed.store(true, Ordering::Release);
             Ok(())

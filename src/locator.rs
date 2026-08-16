@@ -85,6 +85,12 @@ impl Locator {
     }
 
     fn matches(&self) -> Vec<(String, BoundingBox)> {
+        if matches!(
+            &self.matcher,
+            TextMatcher::Literal { text, .. } if text.is_empty()
+        ) {
+            return Vec::new();
+        }
         let lines = self.screen.lines(false);
         let mut found = Vec::new();
         for (row, line) in lines.iter().enumerate() {
@@ -159,6 +165,14 @@ mod tests {
         terminal.advance(b"ready ready");
         assert_eq!(locator.count(), 2);
         assert!(locator.text().is_err());
+    }
+
+    #[test]
+    fn empty_literal_does_not_match_every_cell_boundary() {
+        let mut terminal = crate::Terminal::new(5, 1).unwrap();
+        terminal.advance(b"text");
+        assert_eq!(terminal.screen().get_by_text("").count(), 0);
+        assert_eq!(terminal.screen().get_by_exact_text("").count(), 0);
     }
     #[test]
     fn regex_bounds_use_display_columns() {

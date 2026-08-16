@@ -609,9 +609,14 @@ impl Perform for TerminalPerformer {
         });
     }
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
-        let private = intermediates == [b'?'];
+        // vte 0.15 normalizes CSI's 0x3f private parameter byte into the
+        // `intermediates` slice (and tests this representation upstream).
+        let is_dec_private_mode = intermediates == b"?";
         self.screen.mutate(|state| {
-            if private && matches!(action, 'h' | 'l') && Self::param(params, 0, 0) == 1049 {
+            if is_dec_private_mode
+                && matches!(action, 'h' | 'l')
+                && Self::param(params, 0, 0) == 1049
+            {
                 return if action == 'h' {
                     let primary = &state.primary;
                     state.alternate = Some(Buffer::new(primary.cols, primary.rows));
