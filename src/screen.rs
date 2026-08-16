@@ -665,9 +665,13 @@ impl Perform for TerminalPerformer {
                 && Self::param(params, 0, 0) == 1049
             {
                 return if action == 'h' {
-                    let primary = &state.primary;
-                    state.alternate = Some(Buffer::new(primary.cols, primary.rows));
-                    true
+                    if state.alternate.is_none() {
+                        let primary = &state.primary;
+                        state.alternate = Some(Buffer::new(primary.cols, primary.rows));
+                        true
+                    } else {
+                        false
+                    }
                 } else {
                     state.alternate.take().is_some()
                 };
@@ -871,6 +875,17 @@ mod tests {
         );
         assert!(terminal.screen().cell(0, 0).unwrap().style.bold);
         terminal.advance(b"\x1b[2Jx\x1b[?1049l");
+        assert!(terminal.screen().text().starts_with("primary"));
+    }
+
+    #[test]
+    fn repeated_alternate_screen_enable_preserves_existing_contents() {
+        let mut terminal = Terminal::new(8, 2).unwrap();
+        terminal.advance(b"primary\x1b[?1049halt\x1b[?1049h");
+
+        assert!(terminal.screen().text().starts_with("alt"));
+
+        terminal.advance(b"\x1b[?1049l");
         assert!(terminal.screen().text().starts_with("primary"));
     }
 

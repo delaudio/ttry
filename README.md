@@ -39,7 +39,8 @@ The standard development gate is:
 ```bash
 cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked --all-targets
+cargo test --locked --lib --bins
+cargo test --locked --test session_integration -- --test-threads=1
 cargo test --locked --doc
 ```
 

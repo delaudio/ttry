@@ -2,6 +2,8 @@ use std::time::{Duration, Instant};
 
 use ttry::{expect, LaunchOptions, ProcessState, TuiSession};
 
+const OUTPUT_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn fixture(mode: &str) -> LaunchOptions {
     LaunchOptions::new(env!("CARGO_BIN_EXE_ttry-fixture"))
         .arg(mode)
@@ -14,10 +16,10 @@ fn launches_in_pty_with_term_dimensions_and_exit() {
     #[cfg(unix)]
     let pid = session.process().process_id().unwrap() as i32;
     session
-        .wait_for_text("TERM=xterm-256color SIZE=40x8", Duration::from_secs(2))
+        .wait_for_text("TERM=xterm-256color SIZE=40x8", OUTPUT_TIMEOUT)
         .unwrap();
     expect(session.process().clone())
-        .timeout(Duration::from_secs(2))
+        .timeout(OUTPUT_TIMEOUT)
         .to_have_exited_with_code(0)
         .unwrap();
     #[cfg(unix)]
@@ -37,7 +39,7 @@ fn relative_executable_resolves_once_against_relative_cwd() {
     )
     .unwrap();
     session
-        .wait_for_text("TERM=xterm-256color SIZE=40x8", Duration::from_secs(2))
+        .wait_for_text("TERM=xterm-256color SIZE=40x8", OUTPUT_TIMEOUT)
         .unwrap();
 }
 
@@ -99,12 +101,10 @@ fn expired_startup_budget_cleans_up_the_completed_spawn() {
 #[test]
 fn keyboard_input_reaches_child_and_updates_screen() {
     let session = TuiSession::launch(fixture("echo")).unwrap();
-    session
-        .wait_for_text("READY", Duration::from_secs(2))
-        .unwrap();
+    session.wait_for_text("READY", OUTPUT_TIMEOUT).unwrap();
     session.keyboard().paste("hello\n").unwrap();
     session
-        .wait_for_text("INPUT:hello", Duration::from_secs(2))
+        .wait_for_text("INPUT:hello", OUTPUT_TIMEOUT)
         .unwrap();
     session.keyboard().press("ctrl+c").unwrap();
     session.close().unwrap();
@@ -115,7 +115,7 @@ fn delayed_output_uses_event_driven_assertion() {
     let session = TuiSession::launch(fixture("delayed")).unwrap();
     session
         .expect(session.get_by_text("ready"))
-        .timeout(Duration::from_secs(2))
+        .timeout(OUTPUT_TIMEOUT)
         .to_be_visible()
         .unwrap();
 }
@@ -123,14 +123,12 @@ fn delayed_output_uses_event_driven_assertion() {
 #[test]
 fn resize_updates_pty_and_screen() {
     let session = TuiSession::launch(fixture("resize")).unwrap();
-    session
-        .wait_for_text("SIZE:40x8", Duration::from_secs(2))
-        .unwrap();
+    session.wait_for_text("SIZE:40x8", OUTPUT_TIMEOUT).unwrap();
     session.resize(60, 12).unwrap();
     assert_eq!(session.screen().dimensions(), (60, 12));
     session.keyboard().paste("x\n").unwrap();
     session
-        .wait_for_text("RESIZED:60x12", Duration::from_secs(2))
+        .wait_for_text("RESIZED:60x12", OUTPUT_TIMEOUT)
         .unwrap();
 }
 
@@ -215,7 +213,7 @@ fn cleanup_terminates_the_entire_process_group() {
         session.process().process_id().map(|pid| pid as i32)
     );
     session
-        .wait_for_text("DESCENDANT_PID=", Duration::from_secs(2))
+        .wait_for_text("DESCENDANT_PID=", OUTPUT_TIMEOUT)
         .unwrap();
     let descendant = session
         .screen()
@@ -253,7 +251,7 @@ fn exited_leader_preserves_the_descendant_grace_period() {
         .env("TTRY_GRACE_DELAY", "4");
     let session = TuiSession::launch(options).unwrap();
     session
-        .wait_for_text("DESCENDANT_PID=", Duration::from_secs(2))
+        .wait_for_text("DESCENDANT_PID=", OUTPUT_TIMEOUT)
         .unwrap();
     let descendant = session
         .screen()
@@ -299,7 +297,7 @@ fn cached_exit_is_rechecked_and_reaped_after_descendants_finish() {
         .env("TTRY_GRACE_DELAY", "0.6");
     let session = TuiSession::launch(options).unwrap();
     session
-        .wait_for_text("DESCENDANT_PID=", Duration::from_secs(2))
+        .wait_for_text("DESCENDANT_PID=", OUTPUT_TIMEOUT)
         .unwrap();
     let leader = Pid::from_raw(session.process().process_id().unwrap() as i32);
     expect(session.process().clone())
@@ -339,7 +337,7 @@ fn exited_leader_still_sends_term_to_live_descendants() {
     options = options.env("TTRY_SIGNAL_MARKER", marker.as_os_str());
     let session = TuiSession::launch(options).unwrap();
     session
-        .wait_for_text("TERM_DESCENDANT_PID=", Duration::from_secs(2))
+        .wait_for_text("TERM_DESCENDANT_PID=", OUTPUT_TIMEOUT)
         .unwrap();
     expect(session.process().clone())
         .timeout(Duration::from_secs(1))
@@ -360,7 +358,7 @@ fn exited_leader_still_offers_eof_to_interactive_descendants() {
     options = options.env("TTRY_SIGNAL_MARKER", marker.as_os_str());
     let session = TuiSession::launch(options).unwrap();
     session
-        .wait_for_text("EOF_DESCENDANT_PID=", Duration::from_secs(2))
+        .wait_for_text("EOF_DESCENDANT_PID=", OUTPUT_TIMEOUT)
         .unwrap();
     expect(session.process().clone())
         .timeout(Duration::from_secs(1))

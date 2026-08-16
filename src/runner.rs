@@ -327,7 +327,7 @@ impl Runner {
         let focused = self.tests.iter().any(|test| test.focus);
         let mut report = RunReport::default();
         let mut unsafe_to_continue = false;
-        for test in self.tests {
+        for (test_index, test) in self.tests.into_iter().enumerate() {
             let name = test.full_name();
             let filtered = grep.is_some_and(|pattern| !name.contains(pattern));
             if unsafe_to_continue || test.skip || filtered || (focused && !test.focus) {
@@ -348,7 +348,7 @@ impl Runner {
             let update_snapshots = self.update_snapshots;
             let (result_sender, result_receiver) = mpsc::sync_channel(1);
             let worker = thread::Builder::new()
-                .name(format!("ttry-test-{name}"))
+                .name(format!("ttry-test-{test_index}"))
                 .spawn(move || {
                     let mut context = TestContext {
                         sessions: worker_sessions,
@@ -816,6 +816,17 @@ mod tests {
         let report = runner.run(None);
         assert_eq!(report.failed, 1);
         assert!(started.elapsed() < Duration::from_millis(500));
+    }
+    #[test]
+    fn long_test_names_are_kept_in_reports_without_becoming_thread_names() {
+        let name = "a".repeat(10_000);
+        let mut runner = Runner::new(Duration::from_secs(1));
+        runner.register(TestCase::new(name.clone(), |_| Ok(())));
+
+        let report = runner.run(None);
+
+        assert_eq!(report.passed, 1);
+        assert_eq!(report.tests[0].name, name);
     }
     #[cfg(unix)]
     #[test]
