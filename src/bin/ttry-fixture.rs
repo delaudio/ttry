@@ -18,6 +18,11 @@ fn main() {
             print!("\rready  ");
             io::stdout().flush().unwrap();
         }
+        "delayed-exit" => {
+            let mut input = [0_u8; 1];
+            io::stdin().read_exact(&mut input).unwrap();
+            thread::sleep(Duration::from_millis(5));
+        }
         "hang" => {
             #[cfg(unix)]
             unsafe {

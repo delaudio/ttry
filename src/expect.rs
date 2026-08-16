@@ -125,9 +125,22 @@ impl LocatorExpect {
 
     fn retry(&self, expectation: &str, predicate: impl Fn() -> Result<bool>) -> Result<()> {
         let deadline = self.options.deadline()?;
+        let mut initial_sample = true;
         loop {
-            if predicate()? {
-                return Ok(());
+            let version = self.locator.screen().version();
+            if !initial_sample && Instant::now() >= deadline {
+                return Err(self.timeout_error(expectation));
+            }
+            let matched = predicate()?;
+            let sampled_at = Instant::now();
+            if matched {
+                if initial_sample || sampled_at < deadline {
+                    return Ok(());
+                }
+                return Err(self.timeout_error(expectation));
+            }
+            if sampled_at >= deadline {
+                return Err(self.timeout_error(expectation));
             }
             if let Some(process) = &self.process {
                 if process.output_drained() {
@@ -141,19 +154,23 @@ impl LocatorExpect {
             }
             let now = Instant::now();
             if now >= deadline {
-                return Err(Error::Timeout {
-                    timeout: self.options.timeout,
-                    context: format!(
-                        "expected locator {} {expectation}; current screen:\n{}",
-                        self.locator.describe(),
-                        self.locator.screen().text()
-                    ),
-                });
+                return Err(self.timeout_error(expectation));
             }
-            let version = self.locator.screen().version();
+            initial_sample = false;
             self.locator
                 .screen()
                 .wait_for_change(version, (deadline - now).min(Duration::from_millis(50)));
+        }
+    }
+
+    fn timeout_error(&self, expectation: &str) -> Error {
+        Error::Timeout {
+            timeout: self.options.timeout,
+            context: format!(
+                "expected locator {} {expectation}; current screen:\n{}",
+                self.locator.describe(),
+                self.locator.screen().text()
+            ),
         }
     }
 }
@@ -172,9 +189,22 @@ impl ScreenExpect {
     }
     pub fn to_contain_text(&self, expected: &str) -> Result<()> {
         let deadline = self.options.deadline()?;
+        let mut initial_sample = true;
         loop {
-            if self.screen.text().contains(expected) {
-                return Ok(());
+            let version = self.screen.version();
+            if !initial_sample && Instant::now() >= deadline {
+                return Err(self.timeout_error(expected));
+            }
+            let matched = self.screen.text().contains(expected);
+            let sampled_at = Instant::now();
+            if matched {
+                if initial_sample || sampled_at < deadline {
+                    return Ok(());
+                }
+                return Err(self.timeout_error(expected));
+            }
+            if sampled_at >= deadline {
+                return Err(self.timeout_error(expected));
             }
             if let Some(process) = &self.process {
                 if process.output_drained() {
@@ -185,17 +215,21 @@ impl ScreenExpect {
             }
             let now = Instant::now();
             if now >= deadline {
-                return Err(Error::Timeout {
-                    timeout: self.options.timeout,
-                    context: format!(
-                        "expected screen to contain `{expected}`; actual:\n{}",
-                        self.screen.text()
-                    ),
-                });
+                return Err(self.timeout_error(expected));
             }
-            let version = self.screen.version();
+            initial_sample = false;
             self.screen
                 .wait_for_change(version, (deadline - now).min(Duration::from_millis(50)));
+        }
+    }
+
+    fn timeout_error(&self, expected: &str) -> Error {
+        Error::Timeout {
+            timeout: self.options.timeout,
+            context: format!(
+                "expected screen to contain `{expected}`; actual:\n{}",
+                self.screen.text()
+            ),
         }
     }
 }
@@ -222,26 +256,41 @@ impl ProcessExpect {
     }
     fn wait_for_exit(&self, expected: Option<i32>) -> Result<()> {
         let deadline = self.options.deadline()?;
+        let mut initial_sample = true;
         loop {
-            if let ProcessState::Exited(status) = self.process.state()? {
+            if !initial_sample && Instant::now() >= deadline {
+                return Err(self.exit_timeout());
+            }
+            let state = self.process.state()?;
+            let sampled_at = Instant::now();
+            if let ProcessState::Exited(status) = state {
                 if expected.is_none() || status.code == expected {
-                    return Ok(());
+                    if initial_sample || sampled_at < deadline {
+                        return Ok(());
+                    }
+                    return Err(self.exit_timeout());
                 }
                 return Err(Error::ProcessExited(format!(
                     "expected exit code {}, got {status}",
                     expected.unwrap()
                 )));
             }
-            if Instant::now() >= deadline {
-                return Err(Error::Timeout {
-                    timeout: self.options.timeout,
-                    context: format!(
-                        "waiting for process exit; recent events: {:?}",
-                        self.process.recent_events()
-                    ),
-                });
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(self.exit_timeout());
             }
-            std::thread::sleep(Duration::from_millis(10));
+            initial_sample = false;
+            std::thread::sleep((deadline - now).min(Duration::from_millis(10)));
+        }
+    }
+
+    fn exit_timeout(&self) -> Error {
+        Error::Timeout {
+            timeout: self.options.timeout,
+            context: format!(
+                "waiting for process exit; recent events: {:?}",
+                self.process.recent_events()
+            ),
         }
     }
 }

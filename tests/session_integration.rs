@@ -186,6 +186,20 @@ fn delayed_output_uses_event_driven_assertion() {
 }
 
 #[test]
+fn process_exit_after_assertion_deadline_is_not_accepted() {
+    let session = TuiSession::launch(fixture("delayed-exit")).unwrap();
+    session.keyboard().paste("x\n").unwrap();
+
+    let result = session
+        .expect_process()
+        .timeout(Duration::from_millis(1))
+        .to_have_exited_with_code(0);
+
+    assert!(matches!(result, Err(ttry::Error::Timeout { .. })));
+    session.close().unwrap();
+}
+
+#[test]
 fn resize_updates_pty_and_screen() {
     let session = TuiSession::launch(fixture("resize")).unwrap();
     session.wait_for_text("SIZE:40x8", OUTPUT_TIMEOUT).unwrap();

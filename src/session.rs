@@ -293,9 +293,22 @@ impl TuiSession {
     pub fn wait_for_text(&self, text: &str, timeout: Duration) -> Result<()> {
         let locator = self.get_by_text(text);
         let deadline = deadline(timeout, "timeout")?;
+        let mut initial_sample = true;
         loop {
-            if locator.is_visible() {
-                return Ok(());
+            let version = self.inner.screen.version();
+            if !initial_sample && Instant::now() >= deadline {
+                return Err(self.text_timeout(text, timeout));
+            }
+            let matched = locator.is_visible();
+            let sampled_at = Instant::now();
+            if matched {
+                if initial_sample || sampled_at < deadline {
+                    return Ok(());
+                }
+                return Err(self.text_timeout(text, timeout));
+            }
+            if sampled_at >= deadline {
+                return Err(self.text_timeout(text, timeout));
             }
             if self.inner.process.output_drained() {
                 if let ProcessState::Exited(status) = self.inner.process.state()? {
@@ -304,18 +317,22 @@ impl TuiSession {
             }
             let now = std::time::Instant::now();
             if now >= deadline {
-                return Err(Error::Timeout {
-                    timeout,
-                    context: format!(
-                        "waiting for text `{text}`; screen:\n{}",
-                        self.inner.screen.text()
-                    ),
-                });
+                return Err(self.text_timeout(text, timeout));
             }
-            let version = self.inner.screen.version();
+            initial_sample = false;
             self.inner
                 .screen
                 .wait_for_change(version, (deadline - now).min(Duration::from_millis(50)));
+        }
+    }
+
+    fn text_timeout(&self, text: &str, timeout: Duration) -> Error {
+        Error::Timeout {
+            timeout,
+            context: format!(
+                "waiting for text `{text}`; screen:\n{}",
+                self.inner.screen.text()
+            ),
         }
     }
 }
