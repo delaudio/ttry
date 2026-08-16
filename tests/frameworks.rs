@@ -27,7 +27,12 @@ fn ratatui_smoke() {
 #[ignore = "requires Go and the isolated Bubble Tea fixture; CI sets TTRY_BUBBLETEA_BIN"]
 fn bubbletea_smoke() {
     let binary = required_env("TTRY_BUBBLETEA_BIN");
-    let session = TuiSession::launch(LaunchOptions::new(binary).size(50, 10)).unwrap();
+    let mut launch = LaunchOptions::new(binary).size(50, 10);
+    // Bubble Tea 1.x probes xterm colors synchronously during package init.
+    // A screen-compatible TERM skips unsupported OSC queries while retaining
+    // normal ANSI rendering for this framework-neutral PTY smoke test.
+    launch.term = "screen-256color".into();
+    let session = TuiSession::launch(launch).unwrap();
     session
         .wait_for_text("Bubble Tea async ready", Duration::from_secs(5))
         .unwrap();

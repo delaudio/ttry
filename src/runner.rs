@@ -11,8 +11,6 @@ use serde::Deserialize;
 use crate::session::{LaunchOptions, TuiSession};
 use crate::{Error, Result};
 
-const CANCELLATION_GRACE: Duration = Duration::from_millis(100);
-
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Reporter {
@@ -271,8 +269,7 @@ impl Runner {
     pub fn run(self, grep: Option<&str>) -> RunReport {
         let focused = self.tests.iter().any(|test| test.focus);
         let mut report = RunReport::default();
-        let mut tests = self.tests.into_iter();
-        while let Some(test) = tests.next() {
+        for test in self.tests {
             let name = test.full_name();
             let filtered = grep.is_some_and(|pattern| !name.contains(pattern));
             if test.skip || filtered || (focused && !test.focus) {
@@ -287,81 +284,69 @@ impl Runner {
             let started = Instant::now();
             let timeout = test.timeout.unwrap_or(self.timeout);
             let sessions = Arc::new(Mutex::new(Vec::new()));
-            let worker_sessions = Arc::clone(&sessions);
             let cancelled = Arc::new(AtomicBool::new(false));
-            let worker_cancelled = Arc::clone(&cancelled);
-            let (sender, receiver) = mpsc::sync_channel(1);
-            let name_for_worker = name.clone();
-            let spawn = thread::Builder::new()
-                .name(format!("ttry-test-{name}"))
+            let watchdog_sessions = Arc::clone(&sessions);
+            let watchdog_cancelled = Arc::clone(&cancelled);
+            let (finished_sender, finished_receiver) = mpsc::sync_channel(1);
+            let watchdog = thread::Builder::new()
+                .name(format!("ttry-watchdog-{name}"))
                 .spawn(move || {
+                    if matches!(
+                        finished_receiver.recv_timeout(timeout),
+                        Err(mpsc::RecvTimeoutError::Timeout)
+                    ) {
+                        watchdog_cancelled.store(true, Ordering::Release);
+                        let context = TestContext {
+                            sessions: watchdog_sessions,
+                            cancelled: watchdog_cancelled,
+                        };
+                        let _ = context.cleanup();
+                        true
+                    } else {
+                        false
+                    }
+                });
+            let result = match watchdog {
+                Ok(watchdog) => {
                     let mut context = TestContext {
-                        sessions: worker_sessions,
-                        cancelled: worker_cancelled,
+                        sessions,
+                        cancelled,
                     };
                     let body_result = catch_unwind(AssertUnwindSafe(|| (test.body)(&mut context)));
                     let cleanup_result = context.cleanup();
-                    let result = match body_result {
-                        Ok(result) => result.and(cleanup_result),
-                        Err(payload) => {
-                            let message = payload
-                                .downcast_ref::<&str>()
-                                .copied()
-                                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-                                .unwrap_or("unknown panic payload");
-                            let cleanup = cleanup_result
-                                .err()
-                                .map(|error| format!("; cleanup also failed: {error}"))
-                                .unwrap_or_default();
-                            Err(Error::Runner(format!(
-                                "test body panicked: {message}{cleanup}"
-                            )))
-                        }
-                    };
-                    let _ = sender.send(result);
-                });
-            let (result, abort_remaining) = match spawn {
-                Ok(worker) => match receiver.recv_timeout(timeout) {
-                    Ok(result) => {
-                        let _ = worker.join();
-                        (result, false)
+                    let _ = finished_sender.send(());
+                    match watchdog.join() {
+                        Ok(true) => Err(Error::Timeout {
+                            timeout,
+                            context: format!("test `{name}` exceeded its timeout"),
+                        }),
+                        Ok(false) => match body_result {
+                            Ok(result) => result.and(cleanup_result),
+                            Err(payload) => {
+                                let message = payload
+                                    .downcast_ref::<&str>()
+                                    .copied()
+                                    .or_else(|| {
+                                        payload.downcast_ref::<String>().map(String::as_str)
+                                    })
+                                    .unwrap_or("unknown panic payload");
+                                let cleanup = cleanup_result
+                                    .err()
+                                    .map(|error| format!("; cleanup also failed: {error}"))
+                                    .unwrap_or_default();
+                                Err(Error::Runner(format!(
+                                    "test body panicked: {message}{cleanup}"
+                                )))
+                            }
+                        },
+                        Err(_) => Err(Error::Runner(format!(
+                            "watchdog for test `{name}` panicked"
+                        ))),
                     }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        cancelled.store(true, Ordering::Release);
-                        let context = TestContext {
-                            sessions,
-                            cancelled,
-                        };
-                        let _ = context.cleanup();
-                        let stopped = !matches!(
-                            receiver.recv_timeout(CANCELLATION_GRACE),
-                            Err(mpsc::RecvTimeoutError::Timeout)
-                        );
-                        if stopped {
-                            let _ = worker.join();
-                        }
-                        (
-                            Err(Error::Timeout {
-                                timeout,
-                                context: format!("test `{name_for_worker}` exceeded its timeout"),
-                            }),
-                            !stopped,
-                        )
-                    }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        let _ = worker.join();
-                        (
-                            Err(Error::Runner(format!("test `{name_for_worker}` panicked"))),
-                            false,
-                        )
-                    }
-                },
-                Err(error) => (
-                    Err(Error::Runner(format!(
-                        "could not start test `{name}`: {error}"
-                    ))),
-                    false,
-                ),
+                }
+                Err(error) => Err(Error::Runner(format!(
+                    "could not start watchdog for test `{name}`: {error}"
+                ))),
             };
             let duration = started.elapsed();
             match result {
@@ -381,17 +366,6 @@ impl Runner {
                         duration,
                     });
                 }
-            }
-            if abort_remaining {
-                for remaining in tests {
-                    report.skipped += 1;
-                    report.tests.push(TestResult {
-                        name: remaining.full_name(),
-                        status: TestStatus::Skipped,
-                        duration: Duration::ZERO,
-                    });
-                }
-                break;
             }
         }
         report
@@ -511,24 +485,24 @@ mod tests {
         ));
     }
     #[test]
-    fn non_cooperative_timeout_is_bounded_and_aborts_remaining_tests() {
+    fn non_cooperative_timeout_waits_for_body_before_next_test() {
         let reached_next_test = Arc::new(AtomicBool::new(false));
         let next_test_marker = Arc::clone(&reached_next_test);
         let mut runner = Runner::new(Duration::from_millis(20));
         runner.register(TestCase::new("slow", |_| {
-            std::thread::sleep(Duration::from_millis(500));
+            std::thread::sleep(Duration::from_millis(200));
             Ok(())
         }));
-        runner.register(TestCase::new("must not run", move |_| {
+        runner.register(TestCase::new("next", move |_| {
             next_test_marker.store(true, Ordering::Release);
             Ok(())
         }));
         let started = Instant::now();
         let report = runner.run(None);
         assert_eq!(report.failed, 1);
-        assert_eq!(report.skipped, 1);
-        assert!(started.elapsed() < Duration::from_millis(300));
-        assert!(!reached_next_test.load(Ordering::Acquire));
+        assert_eq!(report.passed, 1);
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        assert!(reached_next_test.load(Ordering::Acquire));
     }
     #[test]
     fn per_test_timeout_overrides_runner_default() {
@@ -543,7 +517,7 @@ mod tests {
         let started = Instant::now();
         let report = runner.run(None);
         assert_eq!(report.failed, 1);
-        assert!(started.elapsed() < Duration::from_millis(300));
+        assert!(started.elapsed() >= Duration::from_millis(150));
     }
     #[test]
     fn test_body_can_observe_timeout_cancellation() {

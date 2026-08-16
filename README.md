@@ -122,11 +122,11 @@ the final report always contains deterministic pass/fail/skip counts.
 Rust-authored suites can use `Runner`, `TestCase`, and `TestContext::tui` to
 register tests and groups directly. The context owns every session and runs
 cleanup even when the test body returns an error. On timeout, registered
-sessions are closed and the runner waits for the test worker before starting
-the next case. Custom long-running work must poll `TestContext::is_cancelled()`
-to stop cooperatively. If it does not stop within the cancellation grace period,
-the runner returns a bounded timeout and skips the rest of the suite so a
-detached worker cannot interfere with later cases.
+sessions are closed by a watchdog. Custom long-running work must poll
+`TestContext::is_cancelled()` to stop cooperatively. Rust closures execute in
+the runner thread and cannot be terminated forcibly; if one ignores
+cancellation, the runner waits for it before starting the next case. Configured
+CLI tests use bounded PTY startup, assertion, and process-shutdown operations.
 
 ## Keyboard behavior
 
