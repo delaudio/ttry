@@ -456,7 +456,9 @@ impl Screen {
         if self.version() > after {
             return true;
         }
-        let deadline = Instant::now() + timeout;
+        let Some(deadline) = Instant::now().checked_add(timeout) else {
+            return false;
+        };
         let mut observed = self
             .inner
             .changed_version
@@ -1093,6 +1095,12 @@ mod tests {
         assert_eq!(region.dimensions(), (0, 0));
         assert_eq!(region.fixed_text(), "");
         assert!(region.cell(0, 0).is_none());
+    }
+
+    #[test]
+    fn excessive_change_wait_does_not_overflow_deadline() {
+        let screen = Screen::new(1, 1).unwrap();
+        assert!(!screen.wait_for_change(screen.version(), Duration::MAX));
     }
 
     #[test]

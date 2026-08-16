@@ -1,5 +1,21 @@
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+pub(crate) const MAX_OPERATION_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+
+pub(crate) fn validate_timeout(timeout: Duration, field: &'static str) -> Result<()> {
+    if timeout.is_zero() || timeout > MAX_OPERATION_TIMEOUT {
+        return Err(Error::InvalidTimeout { field });
+    }
+    Ok(())
+}
+
+pub(crate) fn deadline(timeout: Duration, field: &'static str) -> Result<Instant> {
+    validate_timeout(timeout, field)?;
+    Instant::now()
+        .checked_add(timeout)
+        .ok_or(Error::InvalidTimeout { field })
+}
 
 /// Errors returned by ttry's public API.
 #[derive(Debug, thiserror::Error)]
@@ -14,7 +30,7 @@ pub enum Error {
         rows: u16,
         max_cells: usize,
     },
-    #[error("invalid {field}; timeout must be greater than zero")]
+    #[error("invalid {field}; timeout must be greater than zero and at most 24 hours")]
     InvalidTimeout { field: &'static str },
     #[error("invalid key expression `{0}`")]
     InvalidKey(String),

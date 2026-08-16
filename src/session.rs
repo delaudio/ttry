@@ -6,17 +6,26 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::error::{deadline, validate_timeout};
 use crate::expect::{LocatorExpect, ProcessExpect, ScreenExpect};
 use crate::keyboard::Keyboard;
 use crate::process::{ProcessState, PtyOptions, PtyProcess};
+use crate::screen::validate_dimensions;
 use crate::{Error, Locator, Rect, Result, Screen, Terminal};
 
-fn ingest_pty_output(reader: &mut dyn Read, terminal: &mut Terminal) -> std::io::Result<()> {
+fn ingest_pty_output(
+    reader: &mut dyn Read,
+    terminal: &mut Terminal,
+    output_lock: &Mutex<()>,
+) -> std::io::Result<()> {
     let mut bytes = [0_u8; 8192];
     loop {
         match reader.read(&mut bytes) {
             Ok(0) => return Ok(()),
-            Ok(count) => terminal.advance(&bytes[..count]),
+            Ok(count) => {
+                let _guard = output_lock.lock().expect("output lock poisoned");
+                terminal.advance(&bytes[..count]);
+            }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
         }
@@ -77,6 +86,7 @@ struct SessionInner {
     process: PtyProcess,
     keyboard: Keyboard,
     screen: Screen,
+    output_lock: Arc<Mutex<()>>,
     reader: Mutex<ReaderLifecycle>,
     reader_shutdown_timeout: Duration,
 }
@@ -191,16 +201,8 @@ pub fn launch(command: impl Into<OsString>) -> Result<TuiSession> {
 
 impl TuiSession {
     pub fn launch(options: LaunchOptions) -> Result<Self> {
-        if options.startup_timeout.is_zero() {
-            return Err(Error::InvalidTimeout {
-                field: "startup_timeout",
-            });
-        }
-        if options.shutdown_timeout.is_zero() {
-            return Err(Error::InvalidTimeout {
-                field: "shutdown_timeout",
-            });
-        }
+        validate_timeout(options.startup_timeout, "startup_timeout")?;
+        validate_timeout(options.shutdown_timeout, "shutdown_timeout")?;
         let startup_timeout = options.startup_timeout;
         let shutdown_timeout = options.shutdown_timeout;
         // Construct every fallible in-memory component before spawning the
@@ -227,10 +229,14 @@ impl TuiSession {
         let screen = terminal.screen();
         let thread_screen = screen.clone();
         let thread_process = process.clone();
+        let output_lock = Arc::new(Mutex::new(()));
+        let reader_output_lock = Arc::clone(&output_lock);
         let reader = thread::Builder::new()
             .name("ttry-pty-reader".into())
             .spawn(move || {
-                if let Err(error) = ingest_pty_output(reader.as_mut(), &mut terminal) {
+                if let Err(error) =
+                    ingest_pty_output(reader.as_mut(), &mut terminal, &reader_output_lock)
+                {
                     thread_process.record_event(format!("PTY reader failed: {error}"));
                 }
                 thread_process.mark_output_drained();
@@ -243,6 +249,7 @@ impl TuiSession {
                 process,
                 keyboard,
                 screen,
+                output_lock,
                 reader: Mutex::new(ReaderLifecycle::Running(reader)),
                 reader_shutdown_timeout: shutdown_timeout,
             }),
@@ -265,6 +272,8 @@ impl TuiSession {
         self.inner.screen.region(rect)
     }
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        validate_dimensions(cols, rows)?;
+        let _guard = self.inner.output_lock.lock().expect("output lock poisoned");
         self.inner.process.resize(cols, rows)?;
         self.inner.screen.resize(cols, rows)
     }
@@ -282,11 +291,8 @@ impl TuiSession {
     }
 
     pub fn wait_for_text(&self, text: &str, timeout: Duration) -> Result<()> {
-        if timeout.is_zero() {
-            return Err(Error::InvalidTimeout { field: "timeout" });
-        }
         let locator = self.get_by_text(text);
-        let deadline = std::time::Instant::now() + timeout;
+        let deadline = deadline(timeout, "timeout")?;
         loop {
             if locator.is_visible() {
                 return Ok(());
@@ -346,7 +352,7 @@ mod tests {
             emitted: false,
         };
         let mut terminal = Terminal::new(10, 1).unwrap();
-        ingest_pty_output(&mut reader, &mut terminal).unwrap();
+        ingest_pty_output(&mut reader, &mut terminal, &Mutex::new(())).unwrap();
         assert_eq!(terminal.screen().text(), "ready");
     }
 

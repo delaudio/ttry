@@ -17,6 +17,7 @@ use nix::sys::signal::{killpg, Signal};
 use nix::unistd::Pid;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
+use crate::error::validate_timeout;
 use crate::screen::validate_dimensions;
 use crate::{Error, Result};
 
@@ -511,11 +512,7 @@ impl std::fmt::Debug for PtyProcess {
 impl PtyProcess {
     pub fn spawn(options: PtyOptions) -> Result<(Self, Box<dyn Read + Send>)> {
         validate_dimensions(options.cols, options.rows)?;
-        if options.shutdown_timeout.is_zero() {
-            return Err(Error::InvalidTimeout {
-                field: "shutdown_timeout",
-            });
-        }
+        validate_timeout(options.shutdown_timeout, "shutdown_timeout")?;
         let command_display = options.command.to_string_lossy().into_owned();
         let command_path = std::path::Path::new(&options.command);
         let resolved_cwd = options

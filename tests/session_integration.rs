@@ -88,6 +88,18 @@ fn zero_startup_timeout_is_rejected_as_invalid_input() {
 }
 
 #[test]
+fn excessive_startup_timeout_is_rejected_as_invalid_input() {
+    let mut options = fixture("hang");
+    options.startup_timeout = Duration::MAX;
+    assert!(matches!(
+        TuiSession::launch(options),
+        Err(ttry::Error::InvalidTimeout {
+            field: "startup_timeout"
+        })
+    ));
+}
+
+#[test]
 fn zero_shutdown_timeout_is_rejected_as_invalid_input() {
     let mut options = fixture("hang");
     options.shutdown_timeout = Duration::ZERO;
@@ -111,6 +123,16 @@ fn zero_operation_timeouts_are_rejected_as_invalid_input() {
         expect(session.process().clone())
             .timeout(Duration::ZERO)
             .to_be_running(),
+        Err(ttry::Error::InvalidTimeout { field: "timeout" })
+    ));
+    assert!(matches!(
+        session.wait_for_text("anything", Duration::MAX),
+        Err(ttry::Error::InvalidTimeout { field: "timeout" })
+    ));
+    assert!(matches!(
+        expect(session.process().clone())
+            .timeout(Duration::MAX)
+            .to_have_exited(),
         Err(ttry::Error::InvalidTimeout { field: "timeout" })
     ));
 
@@ -167,6 +189,11 @@ fn delayed_output_uses_event_driven_assertion() {
 fn resize_updates_pty_and_screen() {
     let session = TuiSession::launch(fixture("resize")).unwrap();
     session.wait_for_text("SIZE:40x8", OUTPUT_TIMEOUT).unwrap();
+    assert!(matches!(
+        session.resize(0, 12),
+        Err(ttry::Error::InvalidDimensions { .. })
+    ));
+    assert_eq!(session.screen().dimensions(), (40, 8));
     session.resize(60, 12).unwrap();
     assert_eq!(session.screen().dimensions(), (60, 12));
     session.keyboard().paste("x\n").unwrap();

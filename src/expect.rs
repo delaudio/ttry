@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use crate::error::{deadline, validate_timeout};
 use crate::locator::Locator;
 use crate::process::{ProcessState, PtyProcess};
 use crate::{Error, Result, Screen};
@@ -19,10 +20,10 @@ impl Default for ExpectOptions {
 
 impl ExpectOptions {
     fn validate(&self) -> Result<()> {
-        if self.timeout.is_zero() {
-            return Err(Error::InvalidTimeout { field: "timeout" });
-        }
-        Ok(())
+        validate_timeout(self.timeout, "timeout")
+    }
+    fn deadline(&self) -> Result<Instant> {
+        deadline(self.timeout, "timeout")
     }
 }
 
@@ -123,8 +124,7 @@ impl LocatorExpect {
     }
 
     fn retry(&self, expectation: &str, predicate: impl Fn() -> Result<bool>) -> Result<()> {
-        self.options.validate()?;
-        let deadline = Instant::now() + self.options.timeout;
+        let deadline = self.options.deadline()?;
         loop {
             if predicate()? {
                 return Ok(());
@@ -171,8 +171,7 @@ impl ScreenExpect {
         self
     }
     pub fn to_contain_text(&self, expected: &str) -> Result<()> {
-        self.options.validate()?;
-        let deadline = Instant::now() + self.options.timeout;
+        let deadline = self.options.deadline()?;
         loop {
             if self.screen.text().contains(expected) {
                 return Ok(());
@@ -222,8 +221,7 @@ impl ProcessExpect {
         self.wait_for_exit(Some(expected))
     }
     fn wait_for_exit(&self, expected: Option<i32>) -> Result<()> {
-        self.options.validate()?;
-        let deadline = Instant::now() + self.options.timeout;
+        let deadline = self.options.deadline()?;
         loop {
             if let ProcessState::Exited(status) = self.process.state()? {
                 if expected.is_none() || status.code == expected {
@@ -291,6 +289,27 @@ mod tests {
             .to_be_visible();
         let screen_result = expect(terminal.screen())
             .timeout(Duration::ZERO)
+            .to_contain_text("ready");
+
+        assert!(matches!(
+            locator_result,
+            Err(Error::InvalidTimeout { field: "timeout" })
+        ));
+        assert!(matches!(
+            screen_result,
+            Err(Error::InvalidTimeout { field: "timeout" })
+        ));
+    }
+
+    #[test]
+    fn excessive_assertion_timeouts_are_rejected_without_panicking() {
+        let terminal = Terminal::new(20, 1).unwrap();
+
+        let locator_result = expect(terminal.screen().get_by_text("ready"))
+            .timeout(Duration::MAX)
+            .to_be_visible();
+        let screen_result = expect(terminal.screen())
+            .timeout(Duration::MAX)
             .to_contain_text("ready");
 
         assert!(matches!(
