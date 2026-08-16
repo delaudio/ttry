@@ -122,6 +122,15 @@ impl Config {
                     ),
                 });
             }
+            if test.allow_running_grace_ms == Some(0) {
+                return Err(Error::Config {
+                    path: path.to_path_buf(),
+                    message: format!(
+                        "allow_running_grace_ms for test `{}` must be greater than zero",
+                        test.name
+                    ),
+                });
+            }
             test.cwd = Some(match test.cwd.take() {
                 Some(cwd) if cwd.is_absolute() => cwd,
                 Some(cwd) => config_directory.join(cwd),
@@ -149,6 +158,10 @@ pub struct ConfiguredTest {
     /// cleanup. Any exit observed during the bounded grace window is rejected.
     #[serde(default)]
     pub allow_running: bool,
+    /// How long an `allow_running` test must remain alive after its final
+    /// assertion. Defaults to 50 ms and can be increased for applications
+    /// whose asynchronous startup work can fail later.
+    pub allow_running_grace_ms: Option<u64>,
     /// Wait for any process exit. `expect_exit_code` implies this and also
     /// checks the exact code.
     pub expect_exit: bool,
@@ -552,7 +565,11 @@ pub fn run_config(config: Config, options: RunOptions) -> RunReport {
                 // `allow_running` requires an interactive process to remain
                 // alive through a short bounded grace window so an immediate
                 // post-assertion exit cannot race a single sample.
-                let exit_deadline = Instant::now() + ALLOW_RUNNING_EXIT_GRACE.min(remaining()?);
+                let configured_grace = configured
+                    .allow_running_grace_ms
+                    .map(Duration::from_millis)
+                    .unwrap_or(ALLOW_RUNNING_EXIT_GRACE);
+                let exit_deadline = Instant::now() + configured_grace.min(remaining()?);
                 loop {
                     if let ProcessState::Exited(status) = session.process().state()? {
                         return Err(Error::ProcessExited(format!(
@@ -628,6 +645,21 @@ mod tests {
         assert!(matches!(
             Config::load(file.path()),
             Err(Error::Config { .. })
+        ));
+    }
+    #[test]
+    fn zero_allow_running_grace_is_rejected() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(
+            file.path(),
+            "[[tests]]\nname = 'interactive'\ncommand = 'app'\nallow_running = true\nallow_running_grace_ms = 0\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            Config::load(file.path()),
+            Err(Error::Config { message, .. })
+                if message.contains("allow_running_grace_ms")
+                    && message.contains("greater than zero")
         ));
     }
     #[test]
@@ -864,6 +896,32 @@ mod tests {
         assert!(matches!(
             &report.tests[0].status,
             TestStatus::Failed(message) if message.contains("exit code 9")
+        ));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn configurable_allow_running_grace_catches_a_later_crash() {
+        let config = Config {
+            timeout_ms: 1_000,
+            tests: vec![ConfiguredTest {
+                name: "later asynchronous crash".into(),
+                command: "/bin/sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "printf 'READY\\r\\n'; sleep 0.08; exit 11".into(),
+                ],
+                expect_text: Some("READY".into()),
+                allow_running: true,
+                allow_running_grace_ms: Some(150),
+                ..ConfiguredTest::default()
+            }],
+            ..Config::default()
+        };
+        let report = run_config(config, RunOptions::default());
+        assert_eq!((report.passed, report.failed), (0, 1), "{report:?}");
+        assert!(matches!(
+            &report.tests[0].status,
+            TestStatus::Failed(message) if message.contains("exit code 11")
         ));
     }
     #[cfg(unix)]

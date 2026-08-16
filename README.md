@@ -110,7 +110,9 @@ expected text, expected exit, expected exit code, and per-test timeouts.
 Configured commands must exit successfully by default, including after a
 screen assertion. Set `allow_running = true` for an interactive TUI that
 must remain alive until cleanup stops it; any exit during a short bounded
-post-assertion grace window fails. Set `expect_exit = true` to accept any exit status, or
+post-assertion grace window fails. The window defaults to 50 ms and
+`allow_running_grace_ms` can increase it for applications with delayed
+asynchronous startup failures. Set `expect_exit = true` to accept any exit status, or
 `expect_exit_code` to require an exact status. CLI options override suite-level
 configuration values; an explicit per-test `timeout_ms` remains the most
 specific timeout and takes precedence over `--timeout`:

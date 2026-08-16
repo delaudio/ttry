@@ -824,19 +824,23 @@ impl PtyProcess {
             self.inner.cleanup_complete.store(true, Ordering::Release);
             return Ok(());
         }
-        // EOT is a session-level graceful shutdown request. Descendants can
-        // still be reading the PTY after the process-group leader exits.
+        // A PTY master has no independently closeable write half: dropping
+        // this writer clone would not produce EOF while the reader clone keeps
+        // the master open. In canonical mode VEOF (normally EOT/0x04) is the
+        // terminal protocol for making a blocked slave-side read return EOF.
+        // Descendants can still be reading after the group leader exits.
         self.inner
             .events
             .lock()
             .expect("events lock poisoned")
             .push("graceful close requested".into());
-        let _ = self
-            .inner
-            .writer
-            .lock()
-            .expect("writer lock poisoned")
-            .write_all(&[0x04]);
+        let eof_result = {
+            let mut writer = self.inner.writer.lock().expect("writer lock poisoned");
+            writer.write_all(&[0x04]).and_then(|()| writer.flush())
+        };
+        if let Err(error) = eof_result {
+            self.record_event(format!("terminal EOF request failed: {error}"));
+        }
         if self.wait_until_tree_exit(self.inner.shutdown_timeout / 3)? {
             self.inner.cleanup_complete.store(true, Ordering::Release);
             return Ok(());
