@@ -1,4 +1,5 @@
 use std::fs;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -12,7 +13,8 @@ use crate::{Error, Result};
 
 const CANCELLATION_GRACE: Duration = Duration::from_millis(100);
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
 pub enum Reporter {
     #[default]
     List,
@@ -36,7 +38,7 @@ impl std::str::FromStr for Reporter {
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub timeout_ms: u64,
-    pub reporter: String,
+    pub reporter: Reporter,
     pub tests: Vec<ConfiguredTest>,
 }
 
@@ -44,7 +46,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             timeout_ms: 5_000,
-            reporter: "list".into(),
+            reporter: Reporter::List,
             tests: Vec::new(),
         }
     }
@@ -67,13 +69,6 @@ impl Config {
                 message: "timeout_ms must be greater than zero".into(),
             });
         }
-        config
-            .reporter
-            .parse::<Reporter>()
-            .map_err(|message| Error::Config {
-                path: path.to_path_buf(),
-                message,
-            })?;
         for test in &config.tests {
             if test.name.trim().is_empty() || test.command.trim().is_empty() {
                 return Err(Error::Config {
@@ -298,7 +293,25 @@ impl Runner {
                         sessions: worker_sessions,
                         cancelled: worker_cancelled,
                     };
-                    let result = (test.body)(&mut context).and(context.cleanup());
+                    let body_result = catch_unwind(AssertUnwindSafe(|| (test.body)(&mut context)));
+                    let cleanup_result = context.cleanup();
+                    let result = match body_result {
+                        Ok(result) => result.and(cleanup_result),
+                        Err(payload) => {
+                            let message = payload
+                                .downcast_ref::<&str>()
+                                .copied()
+                                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                                .unwrap_or("unknown panic payload");
+                            let cleanup = cleanup_result
+                                .err()
+                                .map(|error| format!("; cleanup also failed: {error}"))
+                                .unwrap_or_default();
+                            Err(Error::Runner(format!(
+                                "test body panicked: {message}{cleanup}"
+                            )))
+                        }
+                    };
                     let _ = sender.send(result);
                 });
             let (result, abort_remaining) = match spawn {
@@ -457,6 +470,15 @@ mod tests {
         ));
     }
     #[test]
+    fn invalid_reporter_is_rejected_during_deserialization() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(file.path(), "reporter = 'quiet'\n").unwrap();
+        assert!(matches!(
+            Config::load(file.path()),
+            Err(Error::Config { .. })
+        ));
+    }
+    #[test]
     fn zero_per_test_timeout_is_rejected() {
         let file = tempfile::NamedTempFile::new().unwrap();
         fs::write(
@@ -515,5 +537,23 @@ mod tests {
         }));
         let report = runner.run(None);
         assert_eq!(report.failed, 1);
+    }
+    #[test]
+    fn panicking_test_is_reported_and_runner_continues() {
+        let reached_next_test = Arc::new(AtomicBool::new(false));
+        let next_test_marker = Arc::clone(&reached_next_test);
+        let mut runner = Runner::new(Duration::from_secs(1));
+        runner.register(TestCase::new("panic", |_| panic!("expected panic")));
+        runner.register(TestCase::new("next", move |_| {
+            next_test_marker.store(true, Ordering::Release);
+            Ok(())
+        }));
+        let report = runner.run(None);
+        assert_eq!((report.passed, report.failed), (1, 1));
+        assert!(matches!(
+            &report.tests[0].status,
+            TestStatus::Failed(message) if message.contains("expected panic")
+        ));
+        assert!(reached_next_test.load(Ordering::Acquire));
     }
 }

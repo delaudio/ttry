@@ -68,8 +68,7 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            let selected_reporter =
-                reporter.unwrap_or_else(|| config.reporter.parse().unwrap_or_default());
+            let selected_reporter = reporter.unwrap_or(config.reporter);
             let report = run_config(
                 config,
                 RunOptions {
