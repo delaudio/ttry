@@ -43,7 +43,11 @@ impl Key {
         if expression != " " && expression.trim().is_empty() {
             return Err(Error::InvalidKey(expression.into()));
         }
-        if expression.chars().count() == 1
+        if expression == "+" {
+            return Ok(Key::Text(expression.into()));
+        }
+        if !expression.contains('+')
+            && expression.chars().count() == 1
             && expression.chars().next().is_some_and(|ch| !ch.is_control())
         {
             return Ok(Key::Text(expression.into()));
