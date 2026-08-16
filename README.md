@@ -38,8 +38,9 @@ The standard development gate is:
 
 ```bash
 cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-targets
+cargo test --locked --doc
 ```
 
 CI runs this gate on both macOS and Linux.

@@ -189,11 +189,13 @@ fn encode_modified(ctrl: bool, alt: bool, shift: bool, key: &Key) -> Result<Vec<
         if let Key::Text(text) = key {
             let mut chars = text.chars();
             if let (Some(ch), None) = (chars.next(), chars.next()) {
-                let mut bytes = ch.to_uppercase().to_string().into_bytes();
-                if alt {
-                    bytes.insert(0, 0x1b);
+                if ch.is_ascii_alphabetic() {
+                    let mut bytes = ch.to_ascii_uppercase().to_string().into_bytes();
+                    if alt {
+                        bytes.insert(0, 0x1b);
+                    }
+                    return Ok(bytes);
                 }
-                return Ok(bytes);
             }
         }
     }
@@ -310,5 +312,14 @@ mod tests {
             Key::parse("ctrl+shift+f1"),
             Err(Error::UnsupportedKey(expression, _)) if expression == "ctrl+shift+f1"
         ));
+        assert!(matches!(
+            Key::parse("shift+1"),
+            Err(Error::UnsupportedKey(expression, _)) if expression == "shift+1"
+        ));
+        assert!(matches!(
+            Key::parse("alt+shift+/"),
+            Err(Error::UnsupportedKey(expression, _)) if expression == "alt+shift+/"
+        ));
+        assert_eq!(Key::parse("!").unwrap().encode().unwrap(), b"!");
     }
 }
