@@ -12,4 +12,5 @@ expect_text = "INPUT:hello"
 [[tests]]
 name = "an intentionally optional test"
 command = "path/to/optional-tui"
+expect_exit = true
 skip = true

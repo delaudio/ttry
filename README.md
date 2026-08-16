@@ -103,10 +103,11 @@ cargo run -- test
 ```
 
 The configuration contains deterministic `[[tests]]` entries. Tests run
-serially and support grouping, skip/focus, input, expected text, expected exit
-code, and per-test timeouts. Every configured test must exit within its timeout;
-`expect_exit_code` additionally asserts the exact status. CLI options override
-configuration values:
+serially and support grouping, skip/focus, input, expected text, expected exit,
+expected exit code, and per-test timeouts. Long-running TUIs may pass after
+their screen assertion while cleanup stops them. Set `expect_exit = true` to
+require any normal termination, or `expect_exit_code` to require an exact
+status. CLI options override configuration values:
 
 ```bash
 ttry test \
@@ -130,6 +131,9 @@ cooperatively. Rust closures execute in the runner thread and cannot be
 terminated forcibly; if one ignores cancellation, the runner waits for it
 before starting the next case. Configured CLI tests use bounded PTY startup,
 assertion, and process-shutdown operations.
+`Runner::update_snapshots` propagates the CLI update flag without mutating the
+process environment; test bodies can derive a `SnapshotOptions` value through
+`TestContext::snapshot_options`.
 
 ## Keyboard behavior
 

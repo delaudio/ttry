@@ -372,11 +372,17 @@ impl PtyProcess {
 }
 
 fn normalize_status(status: portable_pty::ExitStatus) -> ExitStatus {
+    // portable-pty 0.9 represents every status as either an explicit `u32`
+    // exit code or a signal. Its std conversion maps an otherwise unavailable,
+    // unsuccessful code to 1, so there is no hidden "unknown means success"
+    // state to infer here. Preserve values outside our signed public range as
+    // unknown rather than truncating them.
     ExitStatus {
         code: status
             .signal()
             .is_none()
-            .then_some(status.exit_code() as i32),
+            .then(|| i32::try_from(status.exit_code()).ok())
+            .flatten(),
         signal: status.signal().map(str::to_owned),
     }
 }

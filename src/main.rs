@@ -28,7 +28,7 @@ enum Command {
         timeout: Option<u64>,
         #[arg(long, value_parser = parse_reporter)]
         reporter: Option<Reporter>,
-        /// Enable snapshot creation/update for test code that reads this environment flag.
+        /// Enable snapshot creation/update for the selected test run.
         #[arg(short = 'u', long)]
         update_snapshots: bool,
     },
@@ -58,9 +58,6 @@ fn main() -> ExitCode {
             reporter,
             update_snapshots,
         } => {
-            if update_snapshots {
-                std::env::set_var("TTRY_UPDATE_SNAPSHOTS", "1");
-            }
             let config = match Config::load(&config) {
                 Ok(config) => config,
                 Err(error) => {
@@ -75,6 +72,7 @@ fn main() -> ExitCode {
                     grep,
                     timeout: timeout.map(Duration::from_millis),
                     reporter: Some(selected_reporter),
+                    update_snapshots,
                 },
             );
             match selected_reporter {

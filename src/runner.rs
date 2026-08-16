@@ -104,6 +104,9 @@ pub struct ConfiguredTest {
     pub cwd: Option<PathBuf>,
     pub input: Option<String>,
     pub expect_text: Option<String>,
+    /// Wait for any process exit. `expect_exit_code` implies this and also
+    /// checks the exact code.
+    pub expect_exit: bool,
     pub expect_exit_code: Option<i32>,
     pub skip: bool,
     pub focus: bool,
@@ -149,10 +152,12 @@ pub struct RunOptions {
     pub grep: Option<String>,
     pub timeout: Option<Duration>,
     pub reporter: Option<Reporter>,
+    pub update_snapshots: bool,
 }
 pub struct TestContext {
     sessions: Arc<Mutex<Vec<TuiSession>>>,
     cancelled: Arc<AtomicBool>,
+    update_snapshots: bool,
 }
 
 impl TestContext {
@@ -185,6 +190,13 @@ impl TestContext {
     /// test body returns.
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
+    }
+    /// Returns snapshot settings derived from the runner's typed options.
+    pub fn snapshot_options(&self, preserve_width: bool) -> crate::SnapshotOptions {
+        crate::SnapshotOptions {
+            update: self.update_snapshots,
+            preserve_width,
+        }
     }
     fn cleanup(&self) -> Result<()> {
         let mut first_error = None;
@@ -255,6 +267,7 @@ impl TestCase {
 pub struct Runner {
     tests: Vec<TestCase>,
     timeout: Duration,
+    update_snapshots: bool,
 }
 
 impl Runner {
@@ -262,7 +275,12 @@ impl Runner {
         Self {
             tests: Vec::new(),
             timeout,
+            update_snapshots: false,
         }
+    }
+    pub fn update_snapshots(mut self, update: bool) -> Self {
+        self.update_snapshots = update;
+        self
     }
     pub fn register(&mut self, test: TestCase) {
         self.tests.push(test);
@@ -306,6 +324,7 @@ impl Runner {
                     let mut context = TestContext {
                         sessions,
                         cancelled,
+                        update_snapshots: self.update_snapshots,
                     };
                     let body_result = catch_unwind(AssertUnwindSafe(|| (test.body)(&mut context)));
                     let cleanup_result = context.cleanup();
@@ -370,7 +389,7 @@ impl Runner {
 pub fn run_config(config: Config, options: RunOptions) -> RunReport {
     let cli_timeout = options.timeout;
     let timeout = cli_timeout.unwrap_or(Duration::from_millis(config.timeout_ms));
-    let mut runner = Runner::new(timeout);
+    let mut runner = Runner::new(timeout).update_snapshots(options.update_snapshots);
     for configured in config.tests {
         let name = configured.name.clone();
         let test_timeout = cli_timeout
@@ -395,11 +414,16 @@ pub fn run_config(config: Config, options: RunOptions) -> RunReport {
             if let Some(expected) = configured.expect_text {
                 session.wait_for_text(&expected, test_timeout)?;
             }
-            let process = session.expect_process().timeout(test_timeout);
             if let Some(code) = configured.expect_exit_code {
-                process.to_have_exited_with_code(code)?;
-            } else {
-                process.to_have_exited()?;
+                session
+                    .expect_process()
+                    .timeout(test_timeout)
+                    .to_have_exited_with_code(code)?;
+            } else if configured.expect_exit {
+                session
+                    .expect_process()
+                    .timeout(test_timeout)
+                    .to_have_exited()?;
             }
             Ok(())
         });
@@ -481,13 +505,14 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
-    fn configured_test_must_exit_even_without_an_expected_code() {
+    fn configured_test_can_explicitly_require_exit_without_a_code() {
         let config = Config {
             timeout_ms: 40,
             tests: vec![ConfiguredTest {
                 name: "hang".into(),
                 command: "/bin/sh".into(),
                 args: vec!["-c".into(), "sleep 1".into()],
+                expect_exit: true,
                 ..ConfiguredTest::default()
             }],
             ..Config::default()
@@ -498,6 +523,35 @@ mod tests {
             &report.tests[0].status,
             TestStatus::Failed(message) if message.contains("timed out")
         ));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn configured_text_check_can_pass_while_tui_remains_running() {
+        let config = Config {
+            timeout_ms: 1_000,
+            tests: vec![ConfiguredTest {
+                name: "long-running tui".into(),
+                command: "/bin/sh".into(),
+                args: vec!["-c".into(), "printf 'READY\\r\\n'; sleep 2".into()],
+                expect_text: Some("READY".into()),
+                ..ConfiguredTest::default()
+            }],
+            ..Config::default()
+        };
+        let report = run_config(config, RunOptions::default());
+        assert_eq!((report.passed, report.failed), (1, 0), "{report:?}");
+    }
+    #[test]
+    fn snapshot_update_mode_is_available_through_test_context() {
+        let observed = Arc::new(AtomicBool::new(false));
+        let marker = Arc::clone(&observed);
+        let mut runner = Runner::new(Duration::from_secs(1)).update_snapshots(true);
+        runner.register(TestCase::new("snapshot options", move |context| {
+            marker.store(context.snapshot_options(false).update, Ordering::Release);
+            Ok(())
+        }));
+        assert!(runner.run(None).success());
+        assert!(observed.load(Ordering::Acquire));
     }
     #[test]
     fn non_cooperative_timeout_waits_for_body_before_next_test() {
