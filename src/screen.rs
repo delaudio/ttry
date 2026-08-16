@@ -571,7 +571,12 @@ impl TerminalPerformer {
     }
 
     fn set_sgr(buffer: &mut Buffer, params: &Params) {
-        let values: Vec<u16> = params.iter().filter_map(|p| p.first().copied()).collect();
+        // ECMA-48 treats an omitted SGR parameter as zero. Preserve empty
+        // fields (for example the first field in CSI ;31 m) as resets.
+        let values: Vec<u16> = params
+            .iter()
+            .map(|parameter| parameter.first().copied().unwrap_or(0))
+            .collect();
         let values = if values.is_empty() { vec![0] } else { values };
         let mut index = 0;
         while index < values.len() {
@@ -929,6 +934,17 @@ mod tests {
             assert_eq!(cell.style.background, Color::Indexed(4));
             assert!(cell.style.bold);
         }
+    }
+
+    #[test]
+    fn empty_sgr_parameter_resets_style_before_following_attributes() {
+        let mut terminal = Terminal::new(2, 1).unwrap();
+        terminal.advance(b"\x1b[1;4m\x1b[;31mX");
+        let style = terminal.screen().cell(0, 0).unwrap().style;
+
+        assert_eq!(style.foreground, Color::Indexed(1));
+        assert!(!style.bold);
+        assert!(!style.underline);
     }
 
     #[test]

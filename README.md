@@ -125,9 +125,10 @@ ttry test \
 ```
 
 Invalid TOML, unknown fields, zero timeouts, empty names/commands, and unknown
-reporters produce readable errors. Relative commands and `cwd` values are
-resolved from the configuration file's directory. A run with no selected tests
-or any failed test makes the CLI exit nonzero;
+reporters produce readable errors. Relative `cwd` values are anchored to the
+configuration file's directory. Commands containing a relative path such as
+`./tool` are then resolved from that effective `cwd`; bare command names use
+`PATH`. A run with no selected tests or any failed test makes the CLI exit nonzero;
 the final report always contains deterministic pass/fail/skip counts.
 
 Rust-authored suites can use `Runner`, `TestCase`, and `TestContext::tui` to

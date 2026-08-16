@@ -690,7 +690,7 @@ mod tests {
         assert!(!config.tests[0].allow_running);
     }
     #[test]
-    fn loaded_config_resolves_working_directories_from_its_own_location() {
+    fn loaded_config_resolves_cwd_without_rewriting_commands() {
         let directory = tempfile::tempdir().unwrap();
         let config_directory = directory.path().join("suite");
         fs::create_dir(&config_directory).unwrap();
@@ -713,6 +713,7 @@ mod tests {
             config.tests[1].cwd.as_deref(),
             Some(relative_directory.as_path())
         );
+        assert_eq!(config.tests[1].command, "./tool");
     }
     #[test]
     fn zero_configured_dimensions_are_rejected() {
