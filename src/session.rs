@@ -424,22 +424,50 @@ mod tests {
     #[test]
     fn session_close_retries_reader_join_after_process_cleanup_completed() {
         let mut options = LaunchOptions::new("/bin/sh")
-            .args(["-c", "exit 0"])
+            .args(["-c", "read _"])
             .size(20, 2);
         options.shutdown_timeout = Duration::from_millis(10);
         let session = TuiSession::launch(options).unwrap();
+        session.keyboard().paste("exit\n").unwrap();
+        let process_deadline = Instant::now() + Duration::from_secs(1);
+        while !matches!(session.process().state().unwrap(), ProcessState::Exited(_)) {
+            assert!(
+                Instant::now() < process_deadline,
+                "process did not exit before the test deadline"
+            );
+            thread::yield_now();
+        }
         session.inner.process.close().unwrap();
         join_reader_until(&session.inner.reader, Duration::from_secs(1)).unwrap();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
         *session.inner.reader.lock().expect("reader lock poisoned") =
-            ReaderLifecycle::Running(thread::spawn(|| {
-                thread::sleep(Duration::from_millis(80));
+            ReaderLifecycle::Running(thread::spawn(move || {
+                release_rx.recv().unwrap();
             }));
 
         assert!(matches!(
             session.close(),
             Err(Error::Runner(message)) if message.contains("PTY reader did not stop")
         ));
-        thread::sleep(Duration::from_millis(90));
+        release_tx.send(()).unwrap();
+        let reader_deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let reader_finished = {
+                let reader = session.inner.reader.lock().expect("reader lock poisoned");
+                match &*reader {
+                    ReaderLifecycle::Running(worker) => worker.is_finished(),
+                    _ => true,
+                }
+            };
+            if reader_finished {
+                break;
+            }
+            assert!(
+                Instant::now() < reader_deadline,
+                "reader did not finish before the test deadline"
+            );
+            thread::yield_now();
+        }
         session.close().unwrap();
     }
 }

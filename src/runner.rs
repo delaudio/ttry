@@ -1064,7 +1064,8 @@ mod tests {
     #[test]
     fn configured_exit_samples_an_exited_process_after_the_deadline() {
         let session =
-            TuiSession::launch(LaunchOptions::new("/bin/sh").args(["-c", "exit 0"])).unwrap();
+            TuiSession::launch(LaunchOptions::new("/bin/sh").args(["-c", "read _"])).unwrap();
+        session.keyboard().paste("exit\n").unwrap();
         let observation_deadline = Instant::now() + Duration::from_secs(1);
         while !matches!(session.process().state().unwrap(), ProcessState::Exited(_)) {
             assert!(Instant::now() < observation_deadline);
