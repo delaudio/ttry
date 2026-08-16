@@ -26,7 +26,7 @@ are not required.
 Install Rust with [rustup](https://rustup.rs/), clone the repository, and run:
 
 ```bash
-cargo test
+cargo test --features internal-test-fixture
 ```
 
 This builds the library and deterministic PTY fixture, then runs unit and
@@ -40,7 +40,7 @@ The standard development gate is:
 cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --lib --bins
-cargo test --locked --test session_integration -- --test-threads=1
+cargo test --locked --tests --features internal-test-fixture -- --test-threads=1
 cargo test --locked --doc
 ```
 
@@ -100,7 +100,7 @@ Copy the example configuration and build the fixture:
 
 ```bash
 cp ttry.example.toml ttry.toml
-cargo build --bin ttry-fixture
+cargo build --features internal-test-fixture --bin ttry-fixture
 cargo run -- test
 ```
 

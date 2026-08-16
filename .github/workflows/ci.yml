@@ -25,7 +25,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: cargo test --locked --lib --bins
-      - run: cargo test --locked --test session_integration -- --test-threads=1
+      - run: cargo test --locked --tests --features internal-test-fixture -- --test-threads=1
       - run: cargo test --locked --doc
 
   frameworks:
