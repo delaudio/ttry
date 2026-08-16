@@ -284,6 +284,9 @@ impl TuiSession {
     }
 
     pub fn wait_for_text(&self, text: &str, timeout: Duration) -> Result<()> {
+        if timeout.is_zero() {
+            return Err(Error::InvalidTimeout { field: "timeout" });
+        }
         let locator = self.get_by_text(text);
         let deadline = std::time::Instant::now() + timeout;
         loop {

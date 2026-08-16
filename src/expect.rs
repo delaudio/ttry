@@ -17,6 +17,15 @@ impl Default for ExpectOptions {
     }
 }
 
+impl ExpectOptions {
+    fn validate(&self) -> Result<()> {
+        if self.timeout.is_zero() {
+            return Err(Error::InvalidTimeout { field: "timeout" });
+        }
+        Ok(())
+    }
+}
+
 /// Namespace for the default assertion timeout.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Expect;
@@ -114,6 +123,7 @@ impl LocatorExpect {
     }
 
     fn retry(&self, expectation: &str, predicate: impl Fn() -> Result<bool>) -> Result<()> {
+        self.options.validate()?;
         let deadline = Instant::now() + self.options.timeout;
         loop {
             if predicate()? {
@@ -161,6 +171,7 @@ impl ScreenExpect {
         self
     }
     pub fn to_contain_text(&self, expected: &str) -> Result<()> {
+        self.options.validate()?;
         let deadline = Instant::now() + self.options.timeout;
         loop {
             if self.screen.text().contains(expected) {
@@ -196,6 +207,7 @@ impl ProcessExpect {
         self
     }
     pub fn to_be_running(&self) -> Result<()> {
+        self.options.validate()?;
         match self.process.state()? {
             ProcessState::Running => Ok(()),
             ProcessState::Exited(status) => Err(Error::ProcessExited(format!(
@@ -210,6 +222,7 @@ impl ProcessExpect {
         self.wait_for_exit(Some(expected))
     }
     fn wait_for_exit(&self, expected: Option<i32>) -> Result<()> {
+        self.options.validate()?;
         let deadline = Instant::now() + self.options.timeout;
         loop {
             if let ProcessState::Exited(status) = self.process.state()? {
@@ -266,5 +279,27 @@ mod tests {
             .timeout(Duration::from_millis(10))
             .to_have_text("ready");
         assert!(matches!(result, Err(Error::Timeout { .. })));
+    }
+
+    #[test]
+    fn zero_assertion_timeout_is_rejected_before_sampling() {
+        let mut terminal = Terminal::new(20, 1).unwrap();
+        terminal.advance(b"ready");
+
+        let locator_result = expect(terminal.screen().get_by_text("ready"))
+            .timeout(Duration::ZERO)
+            .to_be_visible();
+        let screen_result = expect(terminal.screen())
+            .timeout(Duration::ZERO)
+            .to_contain_text("ready");
+
+        assert!(matches!(
+            locator_result,
+            Err(Error::InvalidTimeout { field: "timeout" })
+        ));
+        assert!(matches!(
+            screen_result,
+            Err(Error::InvalidTimeout { field: "timeout" })
+        ));
     }
 }

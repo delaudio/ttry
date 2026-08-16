@@ -66,6 +66,24 @@ fn zero_shutdown_timeout_is_rejected_as_invalid_input() {
 }
 
 #[test]
+fn zero_operation_timeouts_are_rejected_as_invalid_input() {
+    let session = TuiSession::launch(fixture("hang")).unwrap();
+
+    assert!(matches!(
+        session.wait_for_text("anything", Duration::ZERO),
+        Err(ttry::Error::InvalidTimeout { field: "timeout" })
+    ));
+    assert!(matches!(
+        expect(session.process().clone())
+            .timeout(Duration::ZERO)
+            .to_be_running(),
+        Err(ttry::Error::InvalidTimeout { field: "timeout" })
+    ));
+
+    session.close().unwrap();
+}
+
+#[test]
 fn expired_startup_budget_cleans_up_the_completed_spawn() {
     let mut options = fixture("hang");
     options.startup_timeout = Duration::from_nanos(1);
