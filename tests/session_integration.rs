@@ -109,6 +109,17 @@ fn expired_startup_budget_cleans_up_the_completed_spawn() {
 }
 
 #[test]
+fn launch_error_is_not_masked_by_an_expired_startup_budget() {
+    let mut options = LaunchOptions::new("ttry-command-that-does-not-exist");
+    options.startup_timeout = Duration::from_nanos(1);
+
+    assert!(matches!(
+        TuiSession::launch(options),
+        Err(ttry::Error::Launch { .. })
+    ));
+}
+
+#[test]
 fn keyboard_input_reaches_child_and_updates_screen() {
     let session = TuiSession::launch(fixture("echo")).unwrap();
     session.wait_for_text("READY", OUTPUT_TIMEOUT).unwrap();

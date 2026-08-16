@@ -216,17 +216,14 @@ impl TuiSession {
         pty_options.rows = options.rows;
         pty_options.shutdown_timeout = shutdown_timeout;
         let startup_started = Instant::now();
-        let spawned = PtyProcess::spawn(pty_options);
+        let (process, mut reader) = PtyProcess::spawn(pty_options)?;
         if startup_started.elapsed() > startup_timeout {
-            if let Ok((process, _)) = &spawned {
-                let _ = process.close();
-            }
+            let _ = process.close();
             return Err(Error::Timeout {
                 timeout: startup_timeout,
                 context: "starting PTY process".into(),
             });
         }
-        let (process, mut reader) = spawned?;
         let screen = terminal.screen();
         let thread_screen = screen.clone();
         let thread_process = process.clone();
