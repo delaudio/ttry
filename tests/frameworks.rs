@@ -41,6 +41,11 @@ fn bubbletea_smoke() {
         .wait_for_text("Bubble Tea key: x", Duration::from_secs(5))
         .unwrap();
     session.keyboard().press("q").unwrap();
+    session
+        .expect_process()
+        .timeout(Duration::from_secs(5))
+        .to_have_exited_with_code(0)
+        .unwrap();
 }
 
 #[test]
@@ -57,6 +62,11 @@ fn textual_smoke() {
         .wait_for_text("Textual key: x", Duration::from_secs(5))
         .unwrap();
     session.keyboard().press("q").unwrap();
+    session
+        .expect_process()
+        .timeout(Duration::from_secs(5))
+        .to_have_exited_with_code(0)
+        .unwrap();
 }
 
 fn required_env(name: &str) -> String {

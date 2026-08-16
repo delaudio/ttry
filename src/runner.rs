@@ -328,31 +328,32 @@ impl Runner {
                     };
                     let body_result = catch_unwind(AssertUnwindSafe(|| (test.body)(&mut context)));
                     let cleanup_result = context.cleanup();
+                    let completed_result = match body_result {
+                        Ok(result) => result.and(cleanup_result),
+                        Err(payload) => {
+                            let message = payload
+                                .downcast_ref::<&str>()
+                                .copied()
+                                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                                .unwrap_or("unknown panic payload");
+                            let cleanup = cleanup_result
+                                .err()
+                                .map(|error| format!("; cleanup also failed: {error}"))
+                                .unwrap_or_default();
+                            Err(Error::Runner(format!(
+                                "test body panicked: {message}{cleanup}"
+                            )))
+                        }
+                    };
                     let _ = finished_sender.send(());
                     match watchdog.join() {
-                        Ok(true) => Err(Error::Timeout {
-                            timeout,
-                            context: format!("test `{name}` exceeded its timeout"),
+                        Ok(true) => completed_result.and_then(|()| {
+                            Err(Error::Timeout {
+                                timeout,
+                                context: format!("test `{name}` exceeded its timeout"),
+                            })
                         }),
-                        Ok(false) => match body_result {
-                            Ok(result) => result.and(cleanup_result),
-                            Err(payload) => {
-                                let message = payload
-                                    .downcast_ref::<&str>()
-                                    .copied()
-                                    .or_else(|| {
-                                        payload.downcast_ref::<String>().map(String::as_str)
-                                    })
-                                    .unwrap_or("unknown panic payload");
-                                let cleanup = cleanup_result
-                                    .err()
-                                    .map(|error| format!("; cleanup also failed: {error}"))
-                                    .unwrap_or_default();
-                                Err(Error::Runner(format!(
-                                    "test body panicked: {message}{cleanup}"
-                                )))
-                            }
-                        },
+                        Ok(false) => completed_result,
                         Err(_) => Err(Error::Runner(format!(
                             "watchdog for test `{name}` panicked"
                         ))),
@@ -587,6 +588,19 @@ mod tests {
         let report = runner.run(None);
         assert_eq!(report.failed, 1);
         assert!(started.elapsed() >= Duration::from_millis(150));
+    }
+    #[test]
+    fn watchdog_preserves_a_specific_body_error() {
+        let mut runner = Runner::new(Duration::from_millis(20));
+        runner.register(TestCase::new("diagnostic", |_| {
+            std::thread::sleep(Duration::from_millis(50));
+            Err(Error::Runner("specific assertion diagnostic".into()))
+        }));
+        let report = runner.run(None);
+        assert!(matches!(
+            &report.tests[0].status,
+            TestStatus::Failed(message) if message.contains("specific assertion diagnostic")
+        ));
     }
     #[test]
     fn test_body_can_observe_timeout_cancellation() {

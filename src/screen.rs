@@ -348,6 +348,10 @@ impl Screen {
                         let cell = &active.cells[index];
                         if !cell.continuation {
                             line.push_str(&cell.text);
+                        } else if relative_col == 0 {
+                            // The region clipped away the leading half of this
+                            // wide glyph. Retain the selected display column.
+                            line.push(' ');
                         }
                     }
                 }
@@ -939,6 +943,19 @@ mod tests {
                 .fixed_text(),
             "bcd\n234"
         );
+    }
+
+    #[test]
+    fn region_starting_inside_a_wide_glyph_preserves_its_width() {
+        let mut terminal = Terminal::new(4, 1).unwrap();
+        terminal.advance("界x".as_bytes());
+        let region = terminal.screen().region(Rect::new(1, 0, 2, 1)).unwrap();
+        assert_eq!(region.fixed_text(), " x");
+        assert_eq!(region.text(), " x");
+
+        let continuation_only = terminal.screen().region(Rect::new(1, 0, 1, 1)).unwrap();
+        assert_eq!(continuation_only.fixed_text(), " ");
+        assert_eq!(continuation_only.text(), "");
     }
 
     #[test]
