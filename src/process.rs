@@ -192,14 +192,14 @@ impl PtyProcess {
         Ok((process, reader))
     }
 
-    pub fn state(&self) -> ProcessState {
+    pub fn state(&self) -> Result<ProcessState> {
         let mut cached_exit = self.inner.exit.lock().expect("exit lock poisoned");
         if let Some(status) = cached_exit.clone() {
-            return ProcessState::Exited(status);
+            return Ok(ProcessState::Exited(status));
         }
         let mut child = self.inner.child.lock().expect("child lock poisoned");
-        match child.try_wait() {
-            Ok(Some(status)) => {
+        match child.try_wait().map_err(Error::Io)? {
+            Some(status) => {
                 let normalized = normalize_status(status);
                 *cached_exit = Some(normalized.clone());
                 self.inner
@@ -207,14 +207,14 @@ impl PtyProcess {
                     .lock()
                     .expect("events lock poisoned")
                     .push(format!("process exited: {normalized}"));
-                ProcessState::Exited(normalized)
+                Ok(ProcessState::Exited(normalized))
             }
-            _ => ProcessState::Running,
+            None => Ok(ProcessState::Running),
         }
     }
 
-    pub fn is_running(&self) -> bool {
-        matches!(self.state(), ProcessState::Running)
+    pub fn is_running(&self) -> Result<bool> {
+        Ok(matches!(self.state()?, ProcessState::Running))
     }
     pub(crate) fn output_drained(&self) -> bool {
         self.inner.output_drained.load(Ordering::Acquire)
@@ -268,7 +268,7 @@ impl PtyProcess {
         if self.inner.closed.load(Ordering::Acquire) {
             return Ok(());
         }
-        if self.is_running() {
+        if self.is_running()? {
             self.inner
                 .events
                 .lock()
@@ -281,7 +281,7 @@ impl PtyProcess {
                 .expect("writer lock poisoned")
                 .write_all(&[0x04]);
         }
-        if self.wait_until_tree_exit(self.inner.shutdown_timeout / 3) {
+        if self.wait_until_tree_exit(self.inner.shutdown_timeout / 3)? {
             self.inner.closed.store(true, Ordering::Release);
             return Ok(());
         }
@@ -294,7 +294,7 @@ impl PtyProcess {
                 .expect("events lock poisoned")
                 .push("SIGTERM sent to process group".into());
             self.signal_process_group(Signal::SIGTERM)?;
-            if self.wait_until_tree_exit(self.inner.shutdown_timeout / 3) {
+            if self.wait_until_tree_exit(self.inner.shutdown_timeout / 3)? {
                 self.inner.closed.store(true, Ordering::Release);
                 return Ok(());
             }
@@ -309,15 +309,16 @@ impl PtyProcess {
         #[cfg(unix)]
         self.signal_process_group(Signal::SIGKILL)?;
 
-        #[cfg(not(unix))]
-        self.inner
-            .child
-            .lock()
-            .expect("child lock poisoned")
-            .kill()
-            .map_err(|error| Error::Io(std::io::Error::other(error)))?;
+        if self.is_running()? {
+            self.inner
+                .child
+                .lock()
+                .expect("child lock poisoned")
+                .kill()
+                .map_err(|error| Error::Io(std::io::Error::other(error)))?;
+        }
 
-        if self.wait_until_tree_exit(self.inner.shutdown_timeout / 3) {
+        if self.wait_until_tree_exit(self.inner.shutdown_timeout / 3)? {
             self.inner.closed.store(true, Ordering::Release);
             Ok(())
         } else {
@@ -328,19 +329,19 @@ impl PtyProcess {
         }
     }
 
-    fn wait_until_tree_exit(&self, timeout: Duration) -> bool {
+    fn wait_until_tree_exit(&self, timeout: Duration) -> Result<bool> {
         let deadline = Instant::now() + timeout;
         loop {
-            let leader_exited = !self.is_running();
+            let leader_exited = !self.is_running()?;
             #[cfg(unix)]
             let group_exited = !self.process_group_is_running();
             #[cfg(not(unix))]
             let group_exited = true;
             if leader_exited && group_exited {
-                return true;
+                return Ok(true);
             }
             if Instant::now() >= deadline {
-                return false;
+                return Ok(false);
             }
             thread::sleep(Duration::from_millis(10).min(timeout));
         }

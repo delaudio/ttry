@@ -124,6 +124,9 @@ impl Locator {
                 }
                 TextMatcher::Regex(regex) => {
                     for matched in regex.find_iter(line) {
+                        if matched.is_empty() {
+                            continue;
+                        }
                         let col = UnicodeWidthStr::width(&line[..matched.start()]) as u16;
                         found.push((
                             matched.as_str().into(),
@@ -173,6 +176,14 @@ mod tests {
         terminal.advance(b"text");
         assert_eq!(terminal.screen().get_by_text("").count(), 0);
         assert_eq!(terminal.screen().get_by_exact_text("").count(), 0);
+    }
+
+    #[test]
+    fn zero_width_regex_matches_are_not_visible() {
+        let mut terminal = crate::Terminal::new(5, 1).unwrap();
+        terminal.advance(b"text");
+        assert_eq!(terminal.screen().get_by_regex("^").unwrap().count(), 0);
+        assert_eq!(terminal.screen().get_by_regex(r"\b").unwrap().count(), 0);
     }
     #[test]
     fn regex_bounds_use_display_columns() {

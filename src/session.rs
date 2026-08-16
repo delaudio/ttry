@@ -194,7 +194,7 @@ impl TuiSession {
                 return Ok(());
             }
             if self.inner.process.output_drained() {
-                if let ProcessState::Exited(status) = self.inner.process.state() {
+                if let ProcessState::Exited(status) = self.inner.process.state()? {
                     return Err(Error::ProcessExited(status.to_string()));
                 }
             }

@@ -91,7 +91,10 @@ fn cleanup_is_bounded_idempotent_and_leaves_no_child() {
     session.close().unwrap();
     session.close().unwrap();
     assert!(started.elapsed() < Duration::from_secs(2));
-    assert!(matches!(session.process().state(), ProcessState::Exited(_)));
+    assert!(matches!(
+        session.process().state().unwrap(),
+        ProcessState::Exited(_)
+    ));
 }
 
 #[cfg(unix)]

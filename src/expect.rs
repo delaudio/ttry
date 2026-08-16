@@ -117,7 +117,7 @@ impl LocatorExpect {
             }
             if let Some(process) = &self.process {
                 if process.output_drained() {
-                    if let ProcessState::Exited(status) = process.state() {
+                    if let ProcessState::Exited(status) = process.state()? {
                         return Err(Error::ProcessExited(format!(
                             "{status}; expected locator {} {expectation}",
                             self.locator.describe()
@@ -164,7 +164,7 @@ impl ScreenExpect {
             }
             if let Some(process) = &self.process {
                 if process.output_drained() {
-                    if let ProcessState::Exited(status) = process.state() {
+                    if let ProcessState::Exited(status) = process.state()? {
                         return Err(Error::ProcessExited(status.to_string()));
                     }
                 }
@@ -192,7 +192,7 @@ impl ProcessExpect {
         self
     }
     pub fn to_be_running(&self) -> Result<()> {
-        match self.process.state() {
+        match self.process.state()? {
             ProcessState::Running => Ok(()),
             ProcessState::Exited(status) => Err(Error::ProcessExited(format!(
                 "expected running, got {status}"
@@ -208,7 +208,7 @@ impl ProcessExpect {
     fn wait_for_exit(&self, expected: Option<i32>) -> Result<()> {
         let deadline = Instant::now() + self.options.timeout;
         loop {
-            if let ProcessState::Exited(status) = self.process.state() {
+            if let ProcessState::Exited(status) = self.process.state()? {
                 if expected.is_none() || status.code == expected {
                     return Ok(());
                 }
