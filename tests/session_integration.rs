@@ -140,6 +140,11 @@ fn cleanup_is_bounded_idempotent_and_leaves_no_child() {
     let started = Instant::now();
     session.close().unwrap();
     session.close().unwrap();
+    assert!(session
+        .process()
+        .recent_events()
+        .iter()
+        .any(|event| event == "PTY reader joined"));
     assert!(started.elapsed() < Duration::from_secs(2));
     assert!(matches!(
         session.process().state().unwrap(),

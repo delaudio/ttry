@@ -66,16 +66,16 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            let selected_reporter = reporter.unwrap_or_else(|| config.reporter.clone());
             let report = run_config(
                 config,
                 RunOptions {
                     grep,
                     timeout: timeout.map(Duration::from_millis),
+                    reporter,
                     update_snapshots,
                 },
             );
-            match selected_reporter {
+            match &report.reporter {
                 Reporter::List => {
                     for result in &report.tests {
                         match &result.status {

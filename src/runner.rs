@@ -126,8 +126,8 @@ pub struct ConfiguredTest {
     pub input: Option<String>,
     pub expect_text: Option<String>,
     /// Opt out of the default successful-exit assertion after screen checks.
-    /// Intended for interactive TUIs that are stopped by test cleanup. An
-    /// immediately observable failed exit is still rejected.
+    /// Intended for interactive TUIs that must remain alive until test
+    /// cleanup. Any exit observed during the bounded grace window is rejected.
     #[serde(default)]
     pub allow_running: bool,
     /// Wait for any process exit. `expect_exit_code` implies this and also
@@ -155,6 +155,7 @@ pub struct TestResult {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RunReport {
+    pub reporter: Reporter,
     pub passed: usize,
     pub failed: usize,
     pub skipped: usize,
@@ -177,6 +178,7 @@ impl RunReport {
 pub struct RunOptions {
     pub grep: Option<String>,
     pub timeout: Option<Duration>,
+    pub reporter: Option<Reporter>,
     pub update_snapshots: bool,
 }
 pub struct TestContext {
@@ -462,6 +464,10 @@ impl Runner {
 }
 
 pub fn run_config(config: Config, options: RunOptions) -> RunReport {
+    let selected_reporter = options
+        .reporter
+        .clone()
+        .unwrap_or_else(|| config.reporter.clone());
     let cli_timeout = options.timeout;
     let timeout = cli_timeout.unwrap_or(Duration::from_millis(config.timeout_ms));
     let mut runner = Runner::new(timeout).update_snapshots(options.update_snapshots);
@@ -520,16 +526,15 @@ pub fn run_config(config: Config, options: RunOptions) -> RunReport {
                     .timeout(remaining()?)
                     .to_have_exited_with_code(0)?;
             } else {
-                // `allow_running` permits an interactive process to remain
-                // alive, but watches a short bounded grace window so an
-                // immediate post-assertion crash cannot race a single sample.
+                // `allow_running` requires an interactive process to remain
+                // alive through a short bounded grace window so an immediate
+                // post-assertion exit cannot race a single sample.
                 let exit_deadline = Instant::now() + ALLOW_RUNNING_EXIT_GRACE.min(remaining()?);
                 loop {
                     if let ProcessState::Exited(status) = session.process().state()? {
-                        if status.code != Some(0) {
-                            return Err(Error::ProcessExited(status.to_string()));
-                        }
-                        break;
+                        return Err(Error::ProcessExited(format!(
+                            "{status}; allow_running requires the process to remain alive"
+                        )));
                     }
                     let remaining = exit_deadline.saturating_duration_since(Instant::now());
                     if remaining.is_zero() {
@@ -552,7 +557,9 @@ pub fn run_config(config: Config, options: RunOptions) -> RunReport {
         }
         runner.register(test);
     }
-    runner.run(options.grep.as_deref())
+    let mut report = runner.run(options.grep.as_deref());
+    report.reporter = selected_reporter;
+    report
 }
 
 #[cfg(test)]
@@ -589,6 +596,28 @@ mod tests {
             Config::load(file.path()),
             Err(Error::Config { .. })
         ));
+    }
+    #[test]
+    fn run_config_centralizes_reporter_override_resolution() {
+        let config = Config {
+            reporter: Reporter::Dot,
+            ..Config::default()
+        };
+        assert_eq!(
+            run_config(config.clone(), RunOptions::default()).reporter,
+            Reporter::Dot
+        );
+        assert_eq!(
+            run_config(
+                config,
+                RunOptions {
+                    reporter: Some(Reporter::List),
+                    ..RunOptions::default()
+                }
+            )
+            .reporter,
+            Reporter::List
+        );
     }
     #[test]
     fn zero_per_test_timeout_is_rejected() {
@@ -728,6 +757,29 @@ mod tests {
         assert!(matches!(
             &report.tests[0].status,
             TestStatus::Failed(message) if message.contains("exit code 7")
+        ));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn allow_running_rejects_a_clean_exit_after_the_text_check() {
+        let config = Config {
+            timeout_ms: 1_000,
+            tests: vec![ConfiguredTest {
+                name: "early clean exit".into(),
+                command: "/bin/sh".into(),
+                args: vec!["-c".into(), "printf 'READY\r\n'; exit 0".into()],
+                expect_text: Some("READY".into()),
+                allow_running: true,
+                ..ConfiguredTest::default()
+            }],
+            ..Config::default()
+        };
+        let report = run_config(config, RunOptions::default());
+        assert_eq!((report.passed, report.failed), (0, 1), "{report:?}");
+        assert!(matches!(
+            &report.tests[0].status,
+            TestStatus::Failed(message)
+                if message.contains("exit code 0") && message.contains("remain alive")
         ));
     }
     #[cfg(unix)]

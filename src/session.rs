@@ -155,16 +155,14 @@ impl Drop for SessionInner {
 impl SessionInner {
     fn close(&self) -> Result<()> {
         self.process.close()?;
-        // Process cleanup is the close contract. PTY implementations can
-        // delay read-side EOF even after every child has gone, so a bounded
-        // reader join is best effort and must not turn successful process
-        // cleanup into a failure. Preserve diagnostics in the event log.
+        // A successful session close guarantees both process-tree cleanup and
+        // reader termination. The join remains bounded; incomplete reader
+        // shutdown is reported instead of silently returning a partial close.
         match join_reader_until(&self.reader, self.reader_shutdown_timeout) {
-            Ok(()) => {}
-            Err(ReaderJoinError::Timeout(timeout)) => self.process.record_event(format!(
-                "PTY reader cleanup incomplete: {}",
-                ReaderJoinError::Timeout(timeout)
-            )),
+            Ok(()) => self.process.record_event("PTY reader joined"),
+            Err(ReaderJoinError::Timeout(timeout)) => {
+                return Err(Error::Runner(ReaderJoinError::Timeout(timeout).to_string()));
+            }
             Err(ReaderJoinError::Panicked) => {
                 return Err(Error::Runner(ReaderJoinError::Panicked.to_string()));
             }

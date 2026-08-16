@@ -48,12 +48,16 @@ impl Key {
         {
             return Ok(Key::Text(expression.into()));
         }
-        let normalized = expression.trim().to_lowercase();
-        let parts: Vec<&str> = normalized.split('+').collect();
-        if parts.iter().any(|part| part.is_empty()) {
+        let original_parts: Vec<&str> = expression.trim().split('+').collect();
+        if original_parts.iter().any(|part| part.is_empty()) {
             return Err(Error::InvalidKey(expression.into()));
         }
-        let original_key = expression.trim().rsplit('+').next().unwrap_or(expression);
+        let normalized_parts: Vec<String> = original_parts
+            .iter()
+            .map(|part| part.to_ascii_lowercase())
+            .collect();
+        let parts: Vec<&str> = normalized_parts.iter().map(String::as_str).collect();
+        let original_key = original_parts.last().copied().unwrap_or(expression);
         let (modifiers, key_name) = parts.split_at(parts.len() - 1);
         if modifiers
             .iter()
