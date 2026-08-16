@@ -6,6 +6,8 @@ reporter = "list"
 name = "fixture accepts keyboard input"
 command = "./target/debug/ttry-fixture"
 args = ["echo"]
+cols = 80
+rows = 24
 input = "hello\n"
 expect_text = "INPUT:hello"
 

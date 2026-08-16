@@ -83,6 +83,15 @@ impl Config {
                     ),
                 });
             }
+            if test.cols == Some(0) || test.rows == Some(0) {
+                return Err(Error::Config {
+                    path: path.to_path_buf(),
+                    message: format!(
+                        "cols and rows for test `{}` must be greater than zero",
+                        test.name
+                    ),
+                });
+            }
             if test.expect_text.as_deref() == Some("") {
                 return Err(Error::Config {
                     path: path.to_path_buf(),
@@ -102,6 +111,8 @@ pub struct ConfiguredTest {
     pub command: String,
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,
+    pub cols: Option<u16>,
+    pub rows: Option<u16>,
     pub input: Option<String>,
     pub expect_text: Option<String>,
     /// Wait for any process exit. `expect_exit_code` implies this and also
@@ -349,19 +360,7 @@ impl Runner {
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         cancelled.store(true, Ordering::Release);
                         let cleanup_result = cleanup_sessions(&sessions);
-                        // Cleanup often releases a blocked PTY assertion. Give
-                        // it a small bounded window to return its diagnostic;
-                        // otherwise detach the uncooperative Rust worker.
-                        let late_result =
-                            result_receiver.recv_timeout(Duration::from_millis(50)).ok();
-                        let diagnostic_result = match late_result {
-                            Some(body_result) => {
-                                let _ = worker.join();
-                                combine_test_and_cleanup(body_result, cleanup_result)
-                            }
-                            None => cleanup_result,
-                        };
-                        let diagnostic = diagnostic_result
+                        let diagnostic = cleanup_result
                             .err()
                             .map(|error| format!("; after cancellation: {error}"))
                             .unwrap_or_default();
@@ -424,7 +423,7 @@ pub fn run_config(config: Config, options: RunOptions) -> RunReport {
         let mut test = TestCase::new(name, move |context| {
             let mut launch = LaunchOptions::new(configured.command)
                 .args(configured.args)
-                .size(80, 24);
+                .size(configured.cols.unwrap_or(80), configured.rows.unwrap_or(24));
             launch.startup_timeout = test_timeout;
             launch.shutdown_timeout = Duration::from_millis(600);
             if let Some(cwd) = configured.cwd {
@@ -526,6 +525,42 @@ mod tests {
             Err(Error::Config { .. })
         ));
     }
+    #[test]
+    fn zero_configured_dimensions_are_rejected() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(
+            file.path(),
+            "[[tests]]\nname = 'case'\ncommand = 'true'\ncols = 0\nrows = 24\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            Config::load(file.path()),
+            Err(Error::Config { .. })
+        ));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn configured_dimensions_reach_the_child_environment() {
+        let config = Config {
+            timeout_ms: 1_000,
+            tests: vec![ConfiguredTest {
+                name: "custom size".into(),
+                command: "/bin/sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "printf 'SIZE=%sx%s\\r\\n' \"$COLUMNS\" \"$LINES\"".into(),
+                ],
+                cols: Some(100),
+                rows: Some(30),
+                expect_text: Some("SIZE=100x30".into()),
+                expect_exit_code: Some(0),
+                ..ConfiguredTest::default()
+            }],
+            ..Config::default()
+        };
+        let report = run_config(config, RunOptions::default());
+        assert_eq!((report.passed, report.failed), (1, 0), "{report:?}");
+    }
     #[cfg(unix)]
     #[test]
     fn configured_test_can_explicitly_require_exit_without_a_code() {
@@ -612,7 +647,7 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(500));
     }
     #[test]
-    fn timeout_preserves_a_specific_body_error() {
+    fn timeout_does_not_report_a_late_body_error() {
         let mut runner = Runner::new(Duration::from_millis(20));
         runner.register(TestCase::new("diagnostic", |_| {
             std::thread::sleep(Duration::from_millis(50));
@@ -623,7 +658,7 @@ mod tests {
             &report.tests[0].status,
             TestStatus::Failed(message)
                 if message.contains("timed out")
-                    && message.contains("specific assertion diagnostic")
+                    && !message.contains("specific assertion diagnostic")
         ));
     }
     #[cfg(unix)]

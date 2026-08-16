@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc};
+use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::expect::{LocatorExpect, ProcessExpect, ScreenExpect};
 use crate::keyboard::Keyboard;
@@ -124,24 +124,18 @@ impl TuiSession {
         pty_options.cols = options.cols;
         pty_options.rows = options.rows;
         pty_options.shutdown_timeout = options.shutdown_timeout;
-        let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
-        thread::Builder::new()
-            .name("ttry-pty-launcher".into())
-            .spawn(move || {
-                let _ = startup_sender.send(PtyProcess::spawn(pty_options));
-            })?;
-        let (process, mut reader) = match startup_receiver.recv_timeout(startup_timeout) {
-            Ok(result) => result?,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                return Err(Error::Timeout {
-                    timeout: startup_timeout,
-                    context: "starting PTY process".into(),
-                })
+        let startup_started = Instant::now();
+        let spawned = PtyProcess::spawn(pty_options);
+        if startup_started.elapsed() > startup_timeout {
+            if let Ok((process, _)) = &spawned {
+                let _ = process.close();
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(Error::Runner("PTY launcher stopped unexpectedly".into()))
-            }
-        };
+            return Err(Error::Timeout {
+                timeout: startup_timeout,
+                context: "starting PTY process".into(),
+            });
+        }
+        let (process, mut reader) = spawned?;
         let mut terminal = Terminal::new(options.cols, options.rows)?;
         let screen = terminal.screen();
         let thread_screen = screen.clone();

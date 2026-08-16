@@ -103,11 +103,12 @@ cargo run -- test
 ```
 
 The configuration contains deterministic `[[tests]]` entries. Tests run
-serially and support grouping, skip/focus, input, expected text, expected exit,
-expected exit code, and per-test timeouts. Long-running TUIs may pass after
-their screen assertion while cleanup stops them. Set `expect_exit = true` to
-require any normal termination, or `expect_exit_code` to require an exact
-status. CLI options override configuration values:
+serially and support grouping, skip/focus, initial `cols`/`rows`, input,
+expected text, expected exit, expected exit code, and per-test timeouts.
+Long-running TUIs may pass after their screen assertion while cleanup stops
+them. Set `expect_exit = true` to require any normal termination, or
+`expect_exit_code` to require an exact status. CLI options override
+configuration values:
 
 ```bash
 ttry test \
@@ -174,8 +175,9 @@ still runs. This also cleans up descendants spawned by shells and CLIs. Process
 state distinguishes running, normal exit codes, and signal exits.
 Recent lifecycle events are included in timeout diagnostics. Dropping the last
 session handle also performs bounded termination and reaps the child.
-`startup_timeout` bounds PTY process creation; `shutdown_timeout` bounds the
-cleanup sequence. Both must be greater than zero.
+`startup_timeout` rejects PTY creation that completes after its budget; spawn
+remains synchronous so a timeout cannot orphan a launcher thread.
+`shutdown_timeout` bounds the cleanup sequence. Both must be greater than zero.
 
 ## Security
 

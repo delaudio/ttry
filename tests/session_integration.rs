@@ -59,6 +59,19 @@ fn zero_shutdown_timeout_is_rejected_as_invalid_input() {
 }
 
 #[test]
+fn expired_startup_budget_cleans_up_the_completed_spawn() {
+    let mut options = fixture("hang");
+    options.startup_timeout = Duration::from_nanos(1);
+    options.shutdown_timeout = Duration::from_millis(300);
+    let started = Instant::now();
+    assert!(matches!(
+        TuiSession::launch(options),
+        Err(ttry::Error::Timeout { .. })
+    ));
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[test]
 fn keyboard_input_reaches_child_and_updates_screen() {
     let session = TuiSession::launch(fixture("echo")).unwrap();
     session
