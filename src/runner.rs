@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -78,6 +79,15 @@ impl Config {
                     message: "every [[tests]] entry requires non-empty name and command".into(),
                 });
             }
+            if test.timeout_ms == Some(0) {
+                return Err(Error::Config {
+                    path: path.to_path_buf(),
+                    message: format!(
+                        "timeout_ms for test `{}` must be greater than zero",
+                        test.name
+                    ),
+                });
+            }
         }
         Ok(config)
     }
@@ -141,6 +151,7 @@ pub struct RunOptions {
 }
 pub struct TestContext {
     sessions: Arc<Mutex<Vec<TuiSession>>>,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl TestContext {
@@ -151,6 +162,14 @@ impl TestContext {
             .expect("session registry lock poisoned")
             .push(session.clone());
         Ok(session)
+    }
+    /// Returns true once the runner has reached this test's timeout.
+    ///
+    /// Rust test bodies cannot be forcibly stopped safely. Long-running custom
+    /// work should poll this flag and return promptly when cancellation is
+    /// requested. Registered TUI sessions are closed automatically on timeout.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
     }
     fn cleanup(&self) -> Result<()> {
         let mut first_error = None;
@@ -252,6 +271,8 @@ impl Runner {
             let timeout = test.timeout.unwrap_or(self.timeout);
             let sessions = Arc::new(Mutex::new(Vec::new()));
             let worker_sessions = Arc::clone(&sessions);
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let worker_cancelled = Arc::clone(&cancelled);
             let (sender, receiver) = mpsc::sync_channel(1);
             let name_for_worker = name.clone();
             let spawn = thread::Builder::new()
@@ -259,22 +280,32 @@ impl Runner {
                 .spawn(move || {
                     let mut context = TestContext {
                         sessions: worker_sessions,
+                        cancelled: worker_cancelled,
                     };
                     let result = (test.body)(&mut context).and(context.cleanup());
                     let _ = sender.send(result);
                 });
             let result = match spawn {
-                Ok(_) => match receiver.recv_timeout(timeout) {
-                    Ok(result) => result,
+                Ok(worker) => match receiver.recv_timeout(timeout) {
+                    Ok(result) => {
+                        let _ = worker.join();
+                        result
+                    }
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        let context = TestContext { sessions };
+                        cancelled.store(true, Ordering::Release);
+                        let context = TestContext {
+                            sessions,
+                            cancelled,
+                        };
                         let _ = context.cleanup();
+                        let _ = worker.join();
                         Err(Error::Timeout {
                             timeout,
                             context: format!("test `{name_for_worker}` exceeded its timeout"),
                         })
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        let _ = worker.join();
                         Err(Error::Runner(format!("test `{name_for_worker}` panicked")))
                     }
                 },
@@ -384,7 +415,20 @@ mod tests {
         ));
     }
     #[test]
-    fn timeout_returns_without_waiting_for_body() {
+    fn zero_per_test_timeout_is_rejected() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(
+            file.path(),
+            "[[tests]]\nname = 'case'\ncommand = 'true'\ntimeout_ms = 0\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            Config::load(file.path()),
+            Err(Error::Config { .. })
+        ));
+    }
+    #[test]
+    fn timeout_joins_the_test_body_before_continuing() {
         let mut runner = Runner::new(Duration::from_millis(20));
         runner.register(TestCase::new("slow", |_| {
             std::thread::sleep(Duration::from_millis(200));
@@ -393,7 +437,7 @@ mod tests {
         let started = Instant::now();
         let report = runner.run(None);
         assert_eq!(report.failed, 1);
-        assert!(started.elapsed() < Duration::from_millis(150));
+        assert!(started.elapsed() >= Duration::from_millis(150));
     }
     #[test]
     fn per_test_timeout_overrides_runner_default() {
@@ -408,6 +452,18 @@ mod tests {
         let started = Instant::now();
         let report = runner.run(None);
         assert_eq!(report.failed, 1);
-        assert!(started.elapsed() < Duration::from_millis(150));
+        assert!(started.elapsed() >= Duration::from_millis(150));
+    }
+    #[test]
+    fn test_body_can_observe_timeout_cancellation() {
+        let mut runner = Runner::new(Duration::from_millis(20));
+        runner.register(TestCase::new("cooperative", |context| {
+            while !context.is_cancelled() {
+                std::thread::yield_now();
+            }
+            Ok(())
+        }));
+        let report = runner.run(None);
+        assert_eq!(report.failed, 1);
     }
 }

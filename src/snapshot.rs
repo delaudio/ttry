@@ -32,7 +32,12 @@ impl SnapshotStore {
         }
     }
     pub fn path_for(&self, name: &str) -> PathBuf {
-        self.root.join(format!("{}.snap", sanitize_name(name)))
+        let slug = sanitize_name(name);
+        let slug = if slug.is_empty() { "snapshot" } else { &slug };
+        self.root.join(format!(
+            "{slug}--{:016x}.snap",
+            stable_hash(name.as_bytes())
+        ))
     }
     pub fn assert_screen(&self, name: &str, screen: &Screen) -> Result<SnapshotResult> {
         let content = serialize_screen(screen, self.options.preserve_width);
@@ -97,6 +102,15 @@ fn sanitize_name(name: &str) -> String {
     value.trim_matches('-').to_string()
 }
 
+fn stable_hash(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 fn unified_diff(expected: &str, received: &str) -> String {
     let diff = TextDiff::from_lines(expected, received);
     let mut output = String::from("--- expected\n+++ received\n");
@@ -142,5 +156,18 @@ mod tests {
             verify.assert_screen("case", &terminal.screen()),
             Err(Error::SnapshotMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn snapshot_paths_are_nonempty_and_collision_safe() {
+        let store = SnapshotStore::new("snapshots", SnapshotOptions::default());
+        assert_ne!(store.path_for("a/b"), store.path_for("a:b"));
+        assert_ne!(store.path_for("!!!"), PathBuf::from("snapshots/.snap"));
+        assert!(store
+            .path_for("!!!")
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("snapshot--"));
     }
 }

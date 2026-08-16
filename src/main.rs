@@ -24,7 +24,7 @@ enum Command {
         config: PathBuf,
         #[arg(long)]
         grep: Option<String>,
-        #[arg(long, value_name = "MILLISECONDS")]
+        #[arg(long, value_name = "MILLISECONDS", value_parser = parse_positive_timeout)]
         timeout: Option<u64>,
         #[arg(long, value_parser = parse_reporter)]
         reporter: Option<Reporter>,
@@ -36,6 +36,17 @@ enum Command {
 
 fn parse_reporter(value: &str) -> Result<Reporter, String> {
     value.parse()
+}
+
+fn parse_positive_timeout(value: &str) -> Result<u64, String> {
+    let timeout = value
+        .parse::<u64>()
+        .map_err(|_| format!("invalid timeout `{value}`; expected milliseconds"))?;
+    if timeout == 0 {
+        Err("timeout must be greater than zero".into())
+    } else {
+        Ok(timeout)
+    }
 }
 
 fn main() -> ExitCode {
@@ -85,7 +96,7 @@ fn main() -> ExitCode {
                     for result in &report.tests {
                         print!(
                             "{}",
-                            match result.status {
+                            match &result.status {
                                 TestStatus::Passed => '.',
                                 TestStatus::Skipped => 's',
                                 TestStatus::Failed(_) => 'F',

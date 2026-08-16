@@ -85,6 +85,8 @@ also stops promptly if its process exits.
 `SnapshotStore` serializes either a full screen or a region. By default it
 trims trailing spaces on each line; `preserve_width` keeps the requested cell
 width. Files use UTF-8, `\n` line endings, and exactly one final newline.
+Snapshot filenames combine a readable slug with a stable hash, so punctuation
+normalization cannot make two test names overwrite the same file.
 
 Missing or mismatching snapshots fail in normal mode. Set
 `SnapshotOptions.update` explicitly to create or update them. Mismatches show
@@ -119,7 +121,10 @@ the final report always contains deterministic pass/fail/skip counts.
 
 Rust-authored suites can use `Runner`, `TestCase`, and `TestContext::tui` to
 register tests and groups directly. The context owns every session and runs
-cleanup even when the test body returns an error.
+cleanup even when the test body returns an error. On timeout, registered
+sessions are closed and the runner waits for the test worker before starting
+the next case; custom long-running work can poll `TestContext::is_cancelled()`
+to stop cooperatively.
 
 ## Keyboard behavior
 

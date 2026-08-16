@@ -112,7 +112,7 @@ impl Buffer {
         }
     }
 
-    fn print(&mut self, ch: char) {
+    fn print(&mut self, ch: char) -> bool {
         let width = UnicodeWidthChar::width(ch).unwrap_or(0);
         if width == 0 {
             let previous = if self.pending_wrap {
@@ -130,8 +130,9 @@ impl Buffer {
                 } else {
                     self.cells[index].text.push(ch);
                 }
+                return true;
             }
-            return;
+            return false;
         }
         if self.pending_wrap
             || self.cursor_col >= self.cols
@@ -162,6 +163,17 @@ impl Buffer {
         } else {
             self.cursor_col = next_col;
         }
+        true
+    }
+
+    fn erase(&mut self, start: usize, end: usize) -> bool {
+        let changed = self.cells[start..end]
+            .iter()
+            .any(|cell| *cell != Cell::default());
+        if changed {
+            self.cells[start..end].fill(Cell::default());
+        }
+        changed
     }
 
     fn resize(&mut self, cols: u16, rows: u16) {
@@ -286,8 +298,14 @@ impl Screen {
         let parent = self.region.unwrap_or(Rect::new(0, 0, cols, rows));
         if rect.width == 0
             || rect.height == 0
-            || rect.col + rect.width > parent.width
-            || rect.row + rect.height > parent.height
+            || rect
+                .col
+                .checked_add(rect.width)
+                .is_none_or(|end| end > parent.width)
+            || rect
+                .row
+                .checked_add(rect.height)
+                .is_none_or(|end| end > parent.height)
         {
             return Err(Error::OutOfBounds {
                 col: rect.col,
@@ -299,8 +317,18 @@ impl Screen {
         Ok(Self {
             inner: Arc::clone(&self.inner),
             region: Some(Rect::new(
-                parent.col + rect.col,
-                parent.row + rect.row,
+                parent.col.checked_add(rect.col).ok_or(Error::OutOfBounds {
+                    col: rect.col,
+                    row: rect.row,
+                    cols: parent.width,
+                    rows: parent.height,
+                })?,
+                parent.row.checked_add(rect.row).ok_or(Error::OutOfBounds {
+                    col: rect.col,
+                    row: rect.row,
+                    cols: parent.width,
+                    rows: parent.height,
+                })?,
                 rect.width,
                 rect.height,
             )),
@@ -348,6 +376,9 @@ impl Screen {
             return Err(Error::InvalidDimensions { cols, rows });
         }
         let mut state = self.inner.state.write().expect("screen lock poisoned");
+        if state.primary.cols == cols && state.primary.rows == rows {
+            return Ok(());
+        }
         state.primary.resize(cols, rows);
         if let Some(alternate) = state.alternate.as_mut() {
             alternate.resize(cols, rows);
@@ -356,12 +387,9 @@ impl Screen {
         Ok(())
     }
 
-    fn mutate(&self, operation: impl FnOnce(&mut ScreenState)) {
+    fn mutate(&self, operation: impl FnOnce(&mut ScreenState) -> bool) {
         let mut state = self.inner.state.write().expect("screen lock poisoned");
-        let previous_primary = state.primary.clone();
-        let previous_alternate = state.alternate.clone();
-        operation(&mut state);
-        if state.primary != previous_primary || state.alternate != previous_alternate {
+        if operation(&mut state) {
             self.mark_changed(&mut state);
         }
     }
@@ -487,21 +515,30 @@ impl Perform for TerminalPerformer {
         self.screen.mutate(|state| {
             let buffer = state.active_mut();
             match byte {
-                b'\n' | 0x0b | 0x0c => buffer.newline(),
+                b'\n' | 0x0b | 0x0c => {
+                    buffer.newline();
+                    true
+                }
                 b'\r' => {
+                    let changed = buffer.cursor_col != 0 || buffer.pending_wrap;
                     buffer.cursor_col = 0;
                     buffer.pending_wrap = false;
+                    changed
                 }
                 0x08 => {
+                    let before = (buffer.cursor_col, buffer.pending_wrap);
                     buffer.cursor_col = buffer.cursor_col.saturating_sub(1);
                     buffer.pending_wrap = false;
+                    before != (buffer.cursor_col, buffer.pending_wrap)
                 }
                 b'\t' => {
+                    let before = (buffer.cursor_col, buffer.pending_wrap);
                     buffer.cursor_col =
                         ((buffer.cursor_col / 8 + 1) * 8).min(buffer.cols.saturating_sub(1));
                     buffer.pending_wrap = false;
+                    before != (buffer.cursor_col, buffer.pending_wrap)
                 }
-                _ => {}
+                _ => false,
             }
         });
     }
@@ -509,46 +546,81 @@ impl Perform for TerminalPerformer {
         let private = intermediates == [b'?'];
         self.screen.mutate(|state| {
             if private && matches!(action, 'h' | 'l') && Self::param(params, 0, 0) == 1049 {
-                if action == 'h' {
+                return if action == 'h' {
                     let primary = &state.primary;
                     state.alternate = Some(Buffer::new(primary.cols, primary.rows));
+                    true
                 } else {
-                    state.alternate = None;
-                }
-                return;
+                    state.alternate.take().is_some()
+                };
             }
             let buffer = state.active_mut();
-            if action != 'm' {
+            let before_cursor = (buffer.cursor_col, buffer.cursor_row, buffer.pending_wrap);
+            let before_style = buffer.style;
+            let supported = matches!(
+                action,
+                'A' | 'B'
+                    | 'C'
+                    | 'D'
+                    | 'E'
+                    | 'F'
+                    | 'G'
+                    | '`'
+                    | 'H'
+                    | 'f'
+                    | 'J'
+                    | 'K'
+                    | 'm'
+                    | 's'
+                    | 'u'
+            );
+            if !supported {
+                return false;
+            }
+            if action != 'm' && action != 's' {
                 buffer.pending_wrap = false;
             }
-            match action {
+            let cells_changed = match action {
                 'A' => {
-                    buffer.cursor_row = buffer.cursor_row.saturating_sub(Self::param(params, 0, 1))
+                    buffer.cursor_row = buffer.cursor_row.saturating_sub(Self::param(params, 0, 1));
+                    false
                 }
                 'B' => {
-                    buffer.cursor_row = (buffer.cursor_row + Self::param(params, 0, 1))
-                        .min(buffer.rows.saturating_sub(1))
+                    buffer.cursor_row = buffer
+                        .cursor_row
+                        .saturating_add(Self::param(params, 0, 1))
+                        .min(buffer.rows.saturating_sub(1));
+                    false
                 }
                 'C' => {
-                    buffer.cursor_col = (buffer.cursor_col + Self::param(params, 0, 1))
-                        .min(buffer.cols.saturating_sub(1))
+                    buffer.cursor_col = buffer
+                        .cursor_col
+                        .saturating_add(Self::param(params, 0, 1))
+                        .min(buffer.cols.saturating_sub(1));
+                    false
                 }
                 'D' => {
-                    buffer.cursor_col = buffer.cursor_col.saturating_sub(Self::param(params, 0, 1))
+                    buffer.cursor_col = buffer.cursor_col.saturating_sub(Self::param(params, 0, 1));
+                    false
                 }
                 'E' => {
-                    buffer.cursor_row = (buffer.cursor_row + Self::param(params, 0, 1))
+                    buffer.cursor_row = buffer
+                        .cursor_row
+                        .saturating_add(Self::param(params, 0, 1))
                         .min(buffer.rows.saturating_sub(1));
                     buffer.cursor_col = 0;
+                    false
                 }
                 'F' => {
                     buffer.cursor_row = buffer.cursor_row.saturating_sub(Self::param(params, 0, 1));
                     buffer.cursor_col = 0;
+                    false
                 }
                 'G' | '`' => {
                     buffer.cursor_col = Self::param(params, 0, 1)
                         .saturating_sub(1)
-                        .min(buffer.cols.saturating_sub(1))
+                        .min(buffer.cols.saturating_sub(1));
+                    false
                 }
                 'H' | 'f' => {
                     buffer.cursor_row = Self::param(params, 0, 1)
@@ -557,19 +629,26 @@ impl Perform for TerminalPerformer {
                     buffer.cursor_col = Self::param(params, 1, 1)
                         .saturating_sub(1)
                         .min(buffer.cols.saturating_sub(1));
+                    false
                 }
                 'J' => {
                     let mode = Self::param(params, 0, 0);
                     if mode == 2 || mode == 3 {
-                        buffer.cells.fill(Cell::default());
+                        buffer.erase(0, buffer.cells.len())
                     } else if mode == 0 {
                         if let Some(start) = buffer.index(buffer.cursor_col, buffer.cursor_row) {
-                            buffer.cells[start..].fill(Cell::default());
+                            buffer.erase(start, buffer.cells.len())
+                        } else {
+                            false
                         }
                     } else if mode == 1 {
                         if let Some(end) = buffer.index(buffer.cursor_col, buffer.cursor_row) {
-                            buffer.cells[..=end].fill(Cell::default());
+                            buffer.erase(0, end + 1)
+                        } else {
+                            false
                         }
+                    } else {
+                        false
                     }
                 }
                 'K' => {
@@ -578,32 +657,55 @@ impl Perform for TerminalPerformer {
                     let cursor = buffer.index(buffer.cursor_col, buffer.cursor_row).unwrap();
                     let row_end = row_start + buffer.cols as usize;
                     match mode {
-                        1 => buffer.cells[row_start..=cursor].fill(Cell::default()),
-                        2 => buffer.cells[row_start..row_end].fill(Cell::default()),
-                        _ => buffer.cells[cursor..row_end].fill(Cell::default()),
+                        1 => buffer.erase(row_start, cursor + 1),
+                        2 => buffer.erase(row_start, row_end),
+                        _ => buffer.erase(cursor, row_end),
                     }
                 }
-                'm' => Self::set_sgr(buffer, params),
-                's' => buffer.saved_cursor = (buffer.cursor_col, buffer.cursor_row),
-                'u' => (buffer.cursor_col, buffer.cursor_row) = buffer.saved_cursor,
-                _ => {}
-            }
+                'm' => {
+                    Self::set_sgr(buffer, params);
+                    false
+                }
+                's' => {
+                    buffer.saved_cursor = (buffer.cursor_col, buffer.cursor_row);
+                    false
+                }
+                'u' => {
+                    (buffer.cursor_col, buffer.cursor_row) = buffer.saved_cursor;
+                    false
+                }
+                _ => false,
+            };
+            cells_changed
+                || before_cursor != (buffer.cursor_col, buffer.cursor_row, buffer.pending_wrap)
+                || before_style != buffer.style
         });
     }
     fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
         self.screen.mutate(|state| {
             let buffer = state.active_mut();
             match byte {
-                b'7' => buffer.saved_cursor = (buffer.cursor_col, buffer.cursor_row),
-                b'8' => (buffer.cursor_col, buffer.cursor_row) = buffer.saved_cursor,
-                b'D' => buffer.newline(),
-                b'E' => buffer.newline(),
+                b'7' => {
+                    buffer.saved_cursor = (buffer.cursor_col, buffer.cursor_row);
+                    false
+                }
+                b'8' => {
+                    let before = (buffer.cursor_col, buffer.cursor_row);
+                    (buffer.cursor_col, buffer.cursor_row) = buffer.saved_cursor;
+                    before != (buffer.cursor_col, buffer.cursor_row)
+                }
+                b'D' | b'E' => {
+                    buffer.newline();
+                    true
+                }
                 b'c' => {
                     let cols = buffer.cols;
                     let rows = buffer.rows;
+                    let changed = *buffer != Buffer::new(cols, rows);
                     *buffer = Buffer::new(cols, rows);
+                    changed
                 }
-                _ => {}
+                _ => false,
             }
         });
     }
@@ -671,5 +773,14 @@ mod tests {
                 .fixed_text(),
             "bcd\n234"
         );
+    }
+
+    #[test]
+    fn overflowing_regions_are_rejected() {
+        let screen = Screen::new(5, 2).unwrap();
+        assert!(matches!(
+            screen.region(Rect::new(u16::MAX, 0, 2, 1)),
+            Err(Error::OutOfBounds { .. })
+        ));
     }
 }
