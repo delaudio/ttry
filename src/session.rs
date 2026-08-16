@@ -406,10 +406,19 @@ mod tests {
     fn explicit_session_close_reports_a_reader_panic() {
         let session = TuiSession::launch(
             LaunchOptions::new("/bin/sh")
-                .args(["-c", "exit 0"])
+                .args(["-c", "read _"])
                 .size(20, 2),
         )
         .unwrap();
+        session.keyboard().paste("exit\n").unwrap();
+        let process_deadline = Instant::now() + Duration::from_secs(1);
+        while !matches!(session.process().state().unwrap(), ProcessState::Exited(_)) {
+            assert!(
+                Instant::now() < process_deadline,
+                "process did not exit before the test deadline"
+            );
+            thread::yield_now();
+        }
         session.inner.process.close().unwrap();
         join_reader_until(&session.inner.reader, Duration::from_secs(1)).unwrap();
         *session.inner.reader.lock().expect("reader lock poisoned") = ReaderLifecycle::Panicked;
