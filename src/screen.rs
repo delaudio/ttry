@@ -914,6 +914,39 @@ mod tests {
     }
 
     #[test]
+    fn vte_reports_dec_private_marker_as_an_intermediate() {
+        #[derive(Default)]
+        struct Capture {
+            params: Vec<Vec<u16>>,
+            intermediates: Vec<u8>,
+            action: Option<char>,
+        }
+
+        impl vte::Perform for Capture {
+            fn csi_dispatch(
+                &mut self,
+                params: &Params,
+                intermediates: &[u8],
+                ignore: bool,
+                action: char,
+            ) {
+                assert!(!ignore);
+                self.params = params.iter().map(|parameter| parameter.to_vec()).collect();
+                self.intermediates = intermediates.to_vec();
+                self.action = Some(action);
+            }
+        }
+
+        let mut parser = vte::Parser::new();
+        let mut capture = Capture::default();
+        parser.advance(&mut capture, b"\x1b[?1049h");
+
+        assert_eq!(capture.params, vec![vec![1049]]);
+        assert_eq!(capture.intermediates, b"?");
+        assert_eq!(capture.action, Some('h'));
+    }
+
+    #[test]
     fn repeated_alternate_screen_enable_preserves_existing_contents() {
         let mut terminal = Terminal::new(8, 2).unwrap();
         terminal.advance(b"primary\x1b[?1049halt\x1b[?1049h");

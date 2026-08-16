@@ -446,11 +446,14 @@ impl Runner {
                         let worker_stopped =
                             match result_receiver.recv_timeout(WORKER_CANCELLATION_GRACE) {
                                 Ok(body_result) => {
-                                    if let Err(error) = body_result {
-                                        diagnostic.push_str(&format!(
-                                            "; worker stopped after cancellation: {error}"
-                                        ));
-                                    }
+                                    match body_result {
+                                    Ok(()) => diagnostic.push_str(
+                                        "; worker stopped cooperatively after timeout cancellation",
+                                    ),
+                                    Err(error) => diagnostic.push_str(&format!(
+                                        "; worker stopped after cancellation: {error}"
+                                    )),
+                                }
                                     let _ = worker.join();
                                     true
                                 }
@@ -1142,6 +1145,12 @@ mod tests {
         }));
         let report = runner.run(None);
         assert_eq!(report.failed, 1);
+        assert!(matches!(
+            &report.tests[0].status,
+            TestStatus::Failed(message)
+                if message.contains("timed out")
+                    && message.contains("stopped cooperatively after timeout cancellation")
+        ));
     }
     #[test]
     fn panicking_test_is_reported_and_runner_continues() {
