@@ -94,9 +94,13 @@ pub fn launch(command: impl Into<OsString>) -> Result<TuiSession> {
 impl TuiSession {
     pub fn launch(options: LaunchOptions) -> Result<Self> {
         if options.startup_timeout.is_zero() {
-            return Err(Error::Timeout {
-                timeout: options.startup_timeout,
-                context: "starting PTY process".into(),
+            return Err(Error::InvalidTimeout {
+                field: "startup_timeout",
+            });
+        }
+        if options.shutdown_timeout.is_zero() {
+            return Err(Error::InvalidTimeout {
+                field: "shutdown_timeout",
             });
         }
         let startup_timeout = options.startup_timeout;

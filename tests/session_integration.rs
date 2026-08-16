@@ -35,12 +35,26 @@ fn relative_executable_resolves_once_against_relative_cwd() {
 }
 
 #[test]
-fn zero_startup_timeout_is_enforced() {
+fn zero_startup_timeout_is_rejected_as_invalid_input() {
     let mut options = fixture("hang");
     options.startup_timeout = Duration::ZERO;
     assert!(matches!(
         TuiSession::launch(options),
-        Err(ttry::Error::Timeout { .. })
+        Err(ttry::Error::InvalidTimeout {
+            field: "startup_timeout"
+        })
+    ));
+}
+
+#[test]
+fn zero_shutdown_timeout_is_rejected_as_invalid_input() {
+    let mut options = fixture("hang");
+    options.shutdown_timeout = Duration::ZERO;
+    assert!(matches!(
+        TuiSession::launch(options),
+        Err(ttry::Error::InvalidTimeout {
+            field: "shutdown_timeout"
+        })
     ));
 }
 

@@ -340,10 +340,11 @@ impl PtyProcess {
             if leader_exited && group_exited {
                 return Ok(true);
             }
-            if Instant::now() >= deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
                 return Ok(false);
             }
-            thread::sleep(Duration::from_millis(10).min(timeout));
+            thread::sleep(Duration::from_millis(10).min(remaining));
         }
     }
 
@@ -408,10 +409,14 @@ impl Drop for ProcessInner {
             });
             #[cfg(not(unix))]
             let group_exited = true;
-            if (leader_exited && group_exited) || Instant::now() >= deadline {
+            if leader_exited && group_exited {
                 break;
             }
-            thread::sleep(Duration::from_millis(10).min(self.shutdown_timeout));
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10).min(remaining));
         }
     }
 }

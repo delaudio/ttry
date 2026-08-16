@@ -6,6 +6,8 @@ use std::time::Duration;
 pub enum Error {
     #[error("invalid terminal dimensions {cols}x{rows}; both values must be greater than zero")]
     InvalidDimensions { cols: u16, rows: u16 },
+    #[error("invalid {field}; timeout must be greater than zero")]
+    InvalidTimeout { field: &'static str },
     #[error("invalid key expression `{0}`")]
     InvalidKey(String),
     #[error("unsupported key combination `{0}`: {1}")]

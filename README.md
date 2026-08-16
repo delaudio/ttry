@@ -104,7 +104,9 @@ cargo run -- test
 
 The configuration contains deterministic `[[tests]]` entries. Tests run
 serially and support grouping, skip/focus, input, expected text, expected exit
-code, and per-test timeouts. CLI options override configuration values:
+code, and per-test timeouts. Every configured test must exit within its timeout;
+`expect_exit_code` additionally asserts the exact status. CLI options override
+configuration values:
 
 ```bash
 ttry test \
@@ -169,7 +171,7 @@ state distinguishes running, normal exit codes, and signal exits.
 Recent lifecycle events are included in timeout diagnostics. Dropping the last
 session handle also performs bounded termination and reaps the child.
 `startup_timeout` bounds PTY process creation; `shutdown_timeout` bounds the
-cleanup sequence.
+cleanup sequence. Both must be greater than zero.
 
 ## Security
 

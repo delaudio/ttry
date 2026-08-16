@@ -395,11 +395,11 @@ pub fn run_config(config: Config, options: RunOptions) -> RunReport {
             if let Some(expected) = configured.expect_text {
                 session.wait_for_text(&expected, test_timeout)?;
             }
+            let process = session.expect_process().timeout(test_timeout);
             if let Some(code) = configured.expect_exit_code {
-                session
-                    .expect_process()
-                    .timeout(test_timeout)
-                    .to_have_exited_with_code(code)?;
+                process.to_have_exited_with_code(code)?;
+            } else {
+                process.to_have_exited()?;
             }
             Ok(())
         });
@@ -477,6 +477,26 @@ mod tests {
         assert!(matches!(
             Config::load(file.path()),
             Err(Error::Config { .. })
+        ));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn configured_test_must_exit_even_without_an_expected_code() {
+        let config = Config {
+            timeout_ms: 40,
+            tests: vec![ConfiguredTest {
+                name: "hang".into(),
+                command: "/bin/sh".into(),
+                args: vec!["-c".into(), "sleep 1".into()],
+                ..ConfiguredTest::default()
+            }],
+            ..Config::default()
+        };
+        let report = run_config(config, RunOptions::default());
+        assert_eq!((report.passed, report.failed), (0, 1));
+        assert!(matches!(
+            &report.tests[0].status,
+            TestStatus::Failed(message) if message.contains("timed out")
         ));
     }
     #[test]
