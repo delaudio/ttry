@@ -1,0 +1,20 @@
+# Copy to ttry.toml and adjust the executable path.
+timeout_ms = 5000
+reporter = "list"
+
+[[tests]]
+name = "fixture accepts keyboard input"
+command = "./target/debug/ttry-fixture"
+args = ["echo"]
+cols = 80
+rows = 24
+shutdown_timeout_ms = 600
+input = "hello\n"
+expect_text = "INPUT:hello"
+allow_running = true
+
+[[tests]]
+name = "an intentionally optional test"
+command = "path/to/optional-tui"
+expect_exit = true
+skip = true

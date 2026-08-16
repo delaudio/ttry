@@ -3,89 +3,232 @@
 Playwright-style end-to-end testing for terminal user interfaces.
 
 `ttry` launches a real terminal application inside a Unix pseudo-terminal,
-sends keyboard input, reconstructs the rendered terminal screen, and provides
-assertions and snapshots over the observable result.
-
-The project is written in Rust and initially targets macOS and Linux.
-
-## Why ttry?
-
-Terminal applications are usually tested with a mixture of unit tests, raw
-ANSI snapshots, shell scripts, or ad-hoc PTY harnesses. These approaches often
-miss the behavior users actually see: terminal initialization, keyboard input,
-alternate-screen rendering, asynchronous updates, resizing, and process
-lifecycle.
-
-`ttry` is intended to make that workflow testable through one framework:
+sends keyboard input, reconstructs the rendered screen, and provides live text
+locators, retrying assertions, process assertions, and plain-text snapshots.
+The test framework is Rust; the application under test can use any language or
+TUI framework.
 
 ```text
-launch → press/type → query → wait → assert → snapshot → close
+launch → press/type/paste → query → wait → assert → snapshot → close
 ```
 
-## Project status
+## Requirements and supported platforms
 
-The repository is at the initial implementation stage. The current work is
-focused on the MVP foundations:
+- Rust 1.85 or newer;
+- macOS or Linux;
+- a Unix PTY environment.
 
-- Unix PTY process execution;
-- virtual terminal screen reconstruction;
-- keyboard input encoding;
-- text locators and retrying assertions;
-- plain-text snapshots;
-- a native Rust test runner and CLI.
+Windows/ConPTY is not supported in the first release. Node.js and TypeScript
+are not required.
 
-The API and crate layout may change while these foundations are being built.
+## First test from a clean checkout
 
-## Intended test experience
+Install Rust with [rustup](https://rustup.rs/), clone the repository, and run:
 
-The public API is still being designed. The target experience is a native Rust
-workflow with the same core ideas as Playwright:
+```bash
+cargo test --features internal-test-fixture
+```
 
-```rust
-#[ttry::test]
-async fn opens_projects_panel(tui: ttry::Tui) -> ttry::Result<()> {
-    tui.launch("./target/debug/my-app").await?;
-    tui.keyboard().press("p").await?;
+This builds the library and deterministic PTY fixture, then runs unit and
+integration tests. The integration tests launch a real child in a PTY and
+cover terminal output, keyboard input, asynchronous redraws, resize, exit
+status, and bounded cleanup.
 
-    tui.expect(tui.screen().get_by_text("Projects"))
-        .to_be_visible()
-        .await?;
+The standard development gate is:
 
+```bash
+cargo fmt --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --lib --bins
+cargo test --locked --tests --features internal-test-fixture -- --test-threads=1
+cargo test --locked --doc
+```
+
+CI runs this gate on both macOS and Linux.
+
+## Library API
+
+Commands and arguments are always passed separately; ttry does not insert a
+shell.
+
+```rust,no_run
+use std::time::Duration;
+use ttry::{LaunchOptions, TuiSession};
+
+fn main() -> ttry::Result<()> {
+    let session = TuiSession::launch(
+        LaunchOptions::new("./target/debug/my-app")
+            .arg("--demo")
+            .size(80, 24),
+    )?;
+
+    session.wait_for_text("Projects", Duration::from_secs(5))?;
+    session.keyboard().press("p")?;
+    session.keyboard().type_text("hello", None)?;
+    session.expect(session.get_by_text("Projects"))
+        .to_be_visible()?;
+    session.expect_screen().to_contain_text("Projects")?;
+    session.close()?;
     Ok(())
 }
 ```
 
-The exact syntax will be finalized as the runner and session API are
-implemented.
+`Screen` supports text/line/cell extraction and clipped regions. Locators are
+live: a locator created before a redraw queries the current screen whenever
+`count`, `text`, `is_visible`, or `bounding_box` is called. Single-match
+operations report every matching coordinate when strictness fails.
 
-## Supported applications
+Assertions default to five seconds, wake on screen changes, and use a small
+fallback interval so idle waits do not busy-loop. A session-bound assertion
+also stops promptly if its process exits.
 
-The core is framework-independent. It is intended to test applications built
-with, among others:
+## Snapshots
 
-- [Ratatui](https://ratatui.rs/);
-- [Bubble Tea](https://github.com/charmbracelet/bubbletea);
-- [Textual](https://textual.textualize.io/);
-- Ink, Blessed, ncurses, and custom ANSI terminal applications.
+`SnapshotStore` serializes either a full screen or a region. By default it
+trims trailing spaces on each line; `preserve_width` keeps the requested cell
+width. Files use UTF-8, `\n` line endings, and exactly one final newline.
+Snapshot filenames combine a readable slug with a stable hash, so punctuation
+normalization cannot make two test names overwrite the same file.
 
-The application under test may be written in any language. Only the test
-framework itself is implemented in Rust.
+Missing or mismatching snapshots fail in normal mode. Set
+`SnapshotOptions.update` explicitly to create or update them. Mismatches show
+an expected/received line diff.
 
-## Development
+## Native CLI and configuration
 
-Requirements:
-
-- Rust stable toolchain;
-- macOS or Linux;
-- a terminal environment suitable for Unix PTY tests.
-
-Once the initial crate is present, the expected development commands are:
+Copy the example configuration and build the fixture:
 
 ```bash
-cargo test
-cargo fmt --check
-cargo clippy --all-targets --all-features
+cp ttry.example.toml ttry.toml
+cargo build --features internal-test-fixture --bin ttry-fixture
+cargo run -- test
 ```
+
+The configuration contains deterministic `[[tests]]` entries. Tests run
+serially and support grouping, skip/focus, initial `cols`/`rows`, input,
+expected text, expected exit, expected exit code, and per-test timeouts.
+Configured commands must exit successfully by default, including after a
+screen assertion. Set `allow_running = true` for an interactive TUI that
+must remain alive until cleanup stops it; any exit during a short bounded
+post-assertion grace window fails. The window defaults to 50 ms and
+`allow_running_grace_ms` can increase it for applications with delayed
+asynchronous startup failures. Set `expect_exit = true` to accept any exit status, or
+`expect_exit_code` to require an exact status. CLI options override suite-level
+configuration values; an explicit per-test `timeout_ms` remains the most
+specific timeout and takes precedence over `--timeout`:
+
+```bash
+ttry test \
+  --config path/to/ttry.toml \
+  --grep "projects" \
+  --timeout 10000 \
+  --reporter dot \
+  --update-snapshots
+```
+
+Invalid TOML, unknown fields, zero timeouts, empty names/commands, and unknown
+reporters produce readable errors. Relative `cwd` values are anchored to the
+configuration file's directory. Commands containing a relative path such as
+`./tool` are then resolved from that effective `cwd`; bare command names use
+`PATH`. A run with no selected tests or any failed test makes the CLI exit nonzero;
+the final report always contains deterministic pass/fail/skip counts.
+Per-test `shutdown_timeout_ms` controls bounded process-tree and PTY-reader
+cleanup and defaults to 600 ms. The `dot` reporter writes only progress symbols
+and a newline to stdout; its human-readable summary is written to stderr.
+
+Rust-authored suites can use `Runner`, `TestCase`, and `TestContext::tui` to
+register tests and groups directly. The context owns every session and runs
+cleanup even when the test body returns an error. On timeout, registered
+sessions are closed by the runner to unblock pending PTY operations.
+Custom long-running work must poll `TestContext::is_cancelled()` to stop
+cooperatively. Rust closures execute in isolated worker threads and cannot be
+terminated forcibly; after bounded cancellation and cleanup, an uncooperative
+worker causes all remaining cases to be skipped, so no later test starts while
+arbitrary timed-out code may still be running. Configured CLI tests use bounded
+PTY startup, assertion, and process-shutdown operations.
+`Runner::update_snapshots` propagates the CLI update flag without mutating the
+process environment; test bodies can derive a `SnapshotOptions` value through
+`TestContext::snapshot_options`.
+
+## Keyboard behavior
+
+`press` accepts one printable character and these normalized expressions:
+
+- Enter, Escape, Tab, Backspace, Delete;
+- arrows, Home, End, Page Up, and Page Down;
+- F1 through F12;
+- portable combinations such as `ctrl+c`, `alt+x`, `shift+tab`, and modified
+  navigation keys.
+
+Ctrl letters use ASCII control bytes. Alt prefixes the base encoding with ESC.
+Shift+Tab uses CSI Z. Other modified navigation keys use xterm CSI modifier
+parameters. Shifted printable characters depend on the keyboard layout, so pass
+the resulting character directly: use `!` instead of `shift+1`, `A` instead of
+`shift+a`, and `alt+A` instead of `alt+shift+a`. Combinations without a portable
+terminal encoding fail with an actionable error. `type_text` preserves character order and can add a delay;
+`paste` performs exactly one write and does not add bracketed-paste markers.
+
+## Framework fixtures
+
+Isolated fixtures live under `fixtures/` for Ratatui, Bubble Tea, and Textual.
+Their smoke tests are marked ignored in the default Rust run, so the core does
+not depend on Cargo, Go, or Python framework setup beyond its own dependencies.
+CI installs each toolchain and runs:
+
+```bash
+cargo test --test frameworks -- --ignored --test-threads=1
+```
+
+Each fixture covers either keyboard input or an asynchronous update. If a
+toolchain is unavailable locally, the ignored test and its required environment
+variable make the skip explicit rather than failing the core test suite.
+
+## Process lifecycle
+
+Session close is idempotent and bounded. It first requests graceful EOF, then
+sends SIGTERM, then SIGKILL to the isolated Unix process group if any process
+still runs. This also cleans up descendants spawned by shells and CLIs. Process
+state distinguishes running, normal exit codes, and signal exits.
+Recent lifecycle events are included in timeout diagnostics. Dropping the last
+session handle also performs bounded termination and reaps the child.
+`startup_timeout` rejects PTY creation that completes after its budget; spawn
+remains synchronous so a timeout cannot orphan a launcher thread.
+`shutdown_timeout` bounds the cleanup sequence. Both must be greater than zero.
+Terminal dimensions must also be nonzero and may allocate at most 1,000,000
+cells per screen buffer.
+
+## Security
+
+Every command configured in Rust code or `ttry.toml` is user-provided code and
+runs with the same account, filesystem access, environment inheritance, and
+network permissions as the `ttry` process. Treat test configurations and
+fixture repositories like executable source code. Do not run untrusted tests,
+and use CI sandboxing or containers when the application under test is not
+trusted. ttry does not invoke a shell unless the configured executable is a
+shell.
+
+## Known VT limitations
+
+The parser intentionally implements the common MVP subset: printable UTF-8,
+basic controls, absolute/relative cursor movement, erase display/line, common
+SGR colors and styles, save/restore cursor, alternate screen, wide characters,
+and combining marks. Unsupported or malformed escape sequences are ignored
+without panicking.
+
+The first release does not fully emulate every xterm behavior. In particular:
+
+- DEC private modes other than alternate screen are not modeled;
+- scroll regions, insert/delete line and character commands, OSC/DCS payloads,
+  hyperlinks, mouse tracking, synchronized updates, and sixel graphics are not
+  represented;
+- grapheme shaping is limited to terminal display width plus combining marks;
+- resize preserves the overlapping rectangle rather than reproducing every
+  terminal's historical reflow policy;
+- style data is retained in cells, but the default snapshot format is plain
+  text only.
+
+These boundaries keep output deterministic for common TUIs. Add a focused
+parser fixture before relying on an escape sequence outside this list.
 
 ## Design principles
 
@@ -94,15 +237,7 @@ cargo clippy --all-targets --all-features
 - Keep terminal dimensions and process environments deterministic.
 - Treat process cleanup as part of every test.
 - Keep the core independent from any specific TUI framework.
-- Make failures useful by showing the current screen and recent actions.
-
-## Scope
-
-The first release targets macOS and Linux and includes keyboard input, text
-queries, automatic waiting, process assertions, and plain-text snapshots.
-
-Windows/ConPTY, mouse input, semantic locators, session recording, trace
-replay, and parallel execution are planned for later phases.
+- Make failures useful by showing the screen, expected state, and process events.
 
 ## License
 

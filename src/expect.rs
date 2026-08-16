@@ -1,0 +1,373 @@
+use std::time::{Duration, Instant};
+
+use crate::error::{deadline, validate_timeout};
+use crate::locator::Locator;
+use crate::process::{ProcessState, PtyProcess};
+use crate::{Error, Result, Screen};
+
+#[derive(Clone, Copy, Debug)]
+pub struct ExpectOptions {
+    pub timeout: Duration,
+}
+
+impl Default for ExpectOptions {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(5),
+        }
+    }
+}
+
+impl ExpectOptions {
+    fn validate(&self) -> Result<()> {
+        validate_timeout(self.timeout, "timeout")
+    }
+    fn deadline(&self) -> Result<Instant> {
+        deadline(self.timeout, "timeout")
+    }
+}
+
+/// Namespace for the default assertion timeout.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Expect;
+
+pub trait IntoExpect {
+    type Assertion;
+    fn into_expect(self) -> Self::Assertion;
+}
+
+pub fn expect<T: IntoExpect>(target: T) -> T::Assertion {
+    target.into_expect()
+}
+
+#[derive(Clone, Debug)]
+pub struct LocatorExpect {
+    locator: Locator,
+    process: Option<PtyProcess>,
+    options: ExpectOptions,
+}
+
+#[derive(Clone, Debug)]
+pub struct ScreenExpect {
+    screen: Screen,
+    process: Option<PtyProcess>,
+    options: ExpectOptions,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProcessExpect {
+    process: PtyProcess,
+    options: ExpectOptions,
+}
+
+impl IntoExpect for Locator {
+    type Assertion = LocatorExpect;
+    fn into_expect(self) -> Self::Assertion {
+        LocatorExpect {
+            locator: self,
+            process: None,
+            options: ExpectOptions::default(),
+        }
+    }
+}
+impl IntoExpect for Screen {
+    type Assertion = ScreenExpect;
+    fn into_expect(self) -> Self::Assertion {
+        ScreenExpect {
+            screen: self,
+            process: None,
+            options: ExpectOptions::default(),
+        }
+    }
+}
+impl IntoExpect for PtyProcess {
+    type Assertion = ProcessExpect;
+    fn into_expect(self) -> Self::Assertion {
+        ProcessExpect {
+            process: self,
+            options: ExpectOptions::default(),
+        }
+    }
+}
+
+impl LocatorExpect {
+    pub(crate) fn with_process(locator: Locator, process: PtyProcess) -> Self {
+        Self {
+            locator,
+            process: Some(process),
+            options: ExpectOptions::default(),
+        }
+    }
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.options.timeout = timeout;
+        self
+    }
+    pub fn to_be_visible(&self) -> Result<()> {
+        self.retry("to be visible", || Ok(self.locator.is_visible()))
+    }
+    pub fn not_to_be_visible(&self) -> Result<()> {
+        self.retry("not to be visible", || Ok(!self.locator.is_visible()))
+    }
+    pub fn to_have_text(&self, expected: &str) -> Result<()> {
+        self.retry(&format!("to have text `{expected}`"), || {
+            match self.locator.text() {
+                Ok(actual) => Ok(actual == expected),
+                Err(Error::StrictLocator { count: 0, .. }) => Ok(false),
+                Err(error) => Err(error),
+            }
+        })
+    }
+    pub fn to_have_count(&self, expected: usize) -> Result<()> {
+        self.retry(&format!("to have count {expected}"), || {
+            Ok(self.locator.count() == expected)
+        })
+    }
+
+    fn retry(&self, expectation: &str, predicate: impl Fn() -> Result<bool>) -> Result<()> {
+        let deadline = self.options.deadline()?;
+        let mut initial_sample = true;
+        loop {
+            let version = self.locator.screen().version();
+            if !initial_sample && Instant::now() >= deadline {
+                return Err(self.timeout_error(expectation));
+            }
+            let matched = predicate()?;
+            let sampled_at = Instant::now();
+            if matched {
+                if initial_sample || sampled_at < deadline {
+                    return Ok(());
+                }
+                return Err(self.timeout_error(expectation));
+            }
+            if sampled_at >= deadline {
+                return Err(self.timeout_error(expectation));
+            }
+            if let Some(process) = &self.process {
+                if process.output_drained() {
+                    if let ProcessState::Exited(status) = process.state()? {
+                        return Err(Error::ProcessExited(format!(
+                            "{status}; expected locator {} {expectation}",
+                            self.locator.describe()
+                        )));
+                    }
+                }
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(self.timeout_error(expectation));
+            }
+            initial_sample = false;
+            self.locator
+                .screen()
+                .wait_for_change(version, (deadline - now).min(Duration::from_millis(50)));
+        }
+    }
+
+    fn timeout_error(&self, expectation: &str) -> Error {
+        Error::Timeout {
+            timeout: self.options.timeout,
+            context: format!(
+                "expected locator {} {expectation}; current screen:\n{}",
+                self.locator.describe(),
+                self.locator.screen().text()
+            ),
+        }
+    }
+}
+
+impl ScreenExpect {
+    pub(crate) fn with_process(screen: Screen, process: PtyProcess) -> Self {
+        Self {
+            screen,
+            process: Some(process),
+            options: ExpectOptions::default(),
+        }
+    }
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.options.timeout = timeout;
+        self
+    }
+    pub fn to_contain_text(&self, expected: &str) -> Result<()> {
+        let deadline = self.options.deadline()?;
+        let mut initial_sample = true;
+        loop {
+            let version = self.screen.version();
+            if !initial_sample && Instant::now() >= deadline {
+                return Err(self.timeout_error(expected));
+            }
+            let matched = self.screen.text().contains(expected);
+            let sampled_at = Instant::now();
+            if matched {
+                if initial_sample || sampled_at < deadline {
+                    return Ok(());
+                }
+                return Err(self.timeout_error(expected));
+            }
+            if sampled_at >= deadline {
+                return Err(self.timeout_error(expected));
+            }
+            if let Some(process) = &self.process {
+                if process.output_drained() {
+                    if let ProcessState::Exited(status) = process.state()? {
+                        return Err(Error::ProcessExited(status.to_string()));
+                    }
+                }
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(self.timeout_error(expected));
+            }
+            initial_sample = false;
+            self.screen
+                .wait_for_change(version, (deadline - now).min(Duration::from_millis(50)));
+        }
+    }
+
+    fn timeout_error(&self, expected: &str) -> Error {
+        Error::Timeout {
+            timeout: self.options.timeout,
+            context: format!(
+                "expected screen to contain `{expected}`; actual:\n{}",
+                self.screen.text()
+            ),
+        }
+    }
+}
+
+impl ProcessExpect {
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.options.timeout = timeout;
+        self
+    }
+    pub fn to_be_running(&self) -> Result<()> {
+        self.options.validate()?;
+        match self.process.state()? {
+            ProcessState::Running => Ok(()),
+            ProcessState::Exited(status) => Err(Error::ProcessExited(format!(
+                "expected running, got {status}"
+            ))),
+        }
+    }
+    pub fn to_have_exited(&self) -> Result<()> {
+        self.wait_for_exit(None)
+    }
+    pub fn to_have_exited_with_code(&self, expected: i32) -> Result<()> {
+        self.wait_for_exit(Some(expected))
+    }
+    fn wait_for_exit(&self, expected: Option<i32>) -> Result<()> {
+        let deadline = self.options.deadline()?;
+        let mut initial_sample = true;
+        loop {
+            if !initial_sample && Instant::now() >= deadline {
+                return Err(self.exit_timeout());
+            }
+            let state = self.process.state()?;
+            let sampled_at = Instant::now();
+            if let ProcessState::Exited(status) = state {
+                if expected.is_none() || status.code == expected {
+                    if initial_sample || sampled_at < deadline {
+                        return Ok(());
+                    }
+                    return Err(self.exit_timeout());
+                }
+                return Err(Error::ProcessExited(format!(
+                    "expected exit code {}, got {status}",
+                    expected.unwrap()
+                )));
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(self.exit_timeout());
+            }
+            initial_sample = false;
+            std::thread::sleep((deadline - now).min(Duration::from_millis(10)));
+        }
+    }
+
+    fn exit_timeout(&self) -> Error {
+        Error::Timeout {
+            timeout: self.options.timeout,
+            context: format!(
+                "waiting for process exit; recent events: {:?}",
+                self.process.recent_events()
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Terminal;
+    #[test]
+    fn visible_text_and_count_assertions() {
+        let mut terminal = Terminal::new(20, 1).unwrap();
+        terminal.advance(b"ready ready");
+        expect(terminal.screen().get_by_text("ready"))
+            .to_have_count(2)
+            .unwrap();
+        expect(terminal.screen()).to_contain_text("ready").unwrap();
+    }
+
+    #[test]
+    fn strict_text_errors_are_not_retried_as_timeouts() {
+        let mut terminal = Terminal::new(20, 1).unwrap();
+        terminal.advance(b"ready ready");
+        let result = expect(terminal.screen().get_by_text("ready"))
+            .timeout(Duration::from_secs(1))
+            .to_have_text("ready");
+        assert!(matches!(result, Err(Error::StrictLocator { count: 2, .. })));
+    }
+
+    #[test]
+    fn missing_text_is_retried_until_timeout() {
+        let terminal = Terminal::new(20, 1).unwrap();
+        let result = expect(terminal.screen().get_by_text("ready"))
+            .timeout(Duration::from_millis(10))
+            .to_have_text("ready");
+        assert!(matches!(result, Err(Error::Timeout { .. })));
+    }
+
+    #[test]
+    fn zero_assertion_timeout_is_rejected_before_sampling() {
+        let mut terminal = Terminal::new(20, 1).unwrap();
+        terminal.advance(b"ready");
+
+        let locator_result = expect(terminal.screen().get_by_text("ready"))
+            .timeout(Duration::ZERO)
+            .to_be_visible();
+        let screen_result = expect(terminal.screen())
+            .timeout(Duration::ZERO)
+            .to_contain_text("ready");
+
+        assert!(matches!(
+            locator_result,
+            Err(Error::InvalidTimeout { field: "timeout" })
+        ));
+        assert!(matches!(
+            screen_result,
+            Err(Error::InvalidTimeout { field: "timeout" })
+        ));
+    }
+
+    #[test]
+    fn excessive_assertion_timeouts_are_rejected_without_panicking() {
+        let terminal = Terminal::new(20, 1).unwrap();
+
+        let locator_result = expect(terminal.screen().get_by_text("ready"))
+            .timeout(Duration::MAX)
+            .to_be_visible();
+        let screen_result = expect(terminal.screen())
+            .timeout(Duration::MAX)
+            .to_contain_text("ready");
+
+        assert!(matches!(
+            locator_result,
+            Err(Error::InvalidTimeout { field: "timeout" })
+        ));
+        assert!(matches!(
+            screen_result,
+            Err(Error::InvalidTimeout { field: "timeout" })
+        ));
+    }
+}
