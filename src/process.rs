@@ -325,7 +325,10 @@ impl PtyProcess {
                 .map_err(|error| Error::Io(std::io::Error::other(error)))?;
         }
 
-        if self.wait_until_tree_exit(self.inner.shutdown_timeout / 3)? {
+        // SIGKILL has already been sent to the whole group. At this point a
+        // successful reap of the direct child is sufficient: killpg(0) can
+        // continue to observe dead-but-unreaped descendant zombies.
+        if self.wait_until_leader_exit(self.inner.shutdown_timeout / 3)? {
             self.inner.closed.store(true, Ordering::Release);
             Ok(())
         } else {
@@ -333,6 +336,20 @@ impl PtyProcess {
                 "process `{}` did not exit after forced termination",
                 self.inner.command
             )))
+        }
+    }
+
+    fn wait_until_leader_exit(&self, timeout: Duration) -> Result<bool> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if !self.is_running()? {
+                return Ok(true);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(false);
+            }
+            thread::sleep(Duration::from_millis(10).min(remaining));
         }
     }
 

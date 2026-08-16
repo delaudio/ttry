@@ -35,6 +35,9 @@ impl Key {
         if expression.is_empty() {
             return Err(Error::InvalidKey(expression.into()));
         }
+        if expression != " " && expression.trim().is_empty() {
+            return Err(Error::InvalidKey(expression.into()));
+        }
         if expression.chars().count() == 1
             && expression.chars().next().is_some_and(|ch| !ch.is_control())
         {
@@ -270,6 +273,8 @@ mod tests {
     fn plus_and_space_are_printable_keys() {
         assert_eq!(Key::parse("+").unwrap().encode().unwrap(), b"+");
         assert_eq!(Key::parse(" ").unwrap().encode().unwrap(), b" ");
+        assert!(Key::parse("  ").is_err());
+        assert!(Key::parse("\t ").is_err());
     }
     #[test]
     fn modifier_encodings() {

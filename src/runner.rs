@@ -358,11 +358,15 @@ impl Runner {
                             let completed_result =
                                 combine_test_and_cleanup(body_result, cleanup_result);
                             if timed_out {
-                                completed_result.and_then(|()| {
-                                    Err(Error::Timeout {
-                                        timeout,
-                                        context: format!("test `{name}` exceeded its timeout"),
-                                    })
+                                let diagnostic = completed_result
+                                    .err()
+                                    .map(|error| format!("; after cancellation: {error}"))
+                                    .unwrap_or_default();
+                                Err(Error::Timeout {
+                                    timeout,
+                                    context: format!(
+                                        "test `{name}` exceeded its timeout{diagnostic}"
+                                    ),
                                 })
                             } else {
                                 completed_result
@@ -613,7 +617,9 @@ mod tests {
         let report = runner.run(None);
         assert!(matches!(
             &report.tests[0].status,
-            TestStatus::Failed(message) if message.contains("specific assertion diagnostic")
+            TestStatus::Failed(message)
+                if message.contains("timed out")
+                    && message.contains("specific assertion diagnostic")
         ));
     }
     #[cfg(unix)]
