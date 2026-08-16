@@ -35,6 +35,16 @@ fn relative_executable_resolves_once_against_relative_cwd() {
 }
 
 #[test]
+fn zero_startup_timeout_is_enforced() {
+    let mut options = fixture("hang");
+    options.startup_timeout = Duration::ZERO;
+    assert!(matches!(
+        TuiSession::launch(options),
+        Err(ttry::Error::Timeout { .. })
+    ));
+}
+
+#[test]
 fn keyboard_input_reaches_child_and_updates_screen() {
     let session = TuiSession::launch(fixture("echo")).unwrap();
     session
@@ -82,4 +92,23 @@ fn cleanup_is_bounded_idempotent_and_leaves_no_child() {
     session.close().unwrap();
     assert!(started.elapsed() < Duration::from_secs(2));
     assert!(matches!(session.process().state(), ProcessState::Exited(_)));
+}
+
+#[cfg(unix)]
+#[test]
+fn drop_cleanup_reaps_the_child_process() {
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+
+    let pid = {
+        let mut options = fixture("hang");
+        options.shutdown_timeout = Duration::from_millis(300);
+        let session = TuiSession::launch(options).unwrap();
+        session.process().process_id().unwrap()
+    };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while kill(Pid::from_raw(pid as i32), None).is_ok() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(kill(Pid::from_raw(pid as i32), None).is_err());
 }

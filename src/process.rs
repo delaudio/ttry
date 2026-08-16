@@ -66,6 +66,7 @@ struct ProcessInner {
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
+    close_lock: Mutex<()>,
     exit: Mutex<Option<ExitStatus>>,
     closed: AtomicBool,
     output_drained: AtomicBool,
@@ -169,6 +170,7 @@ impl PtyProcess {
                 master: Mutex::new(pair.master),
                 writer: Arc::new(Mutex::new(writer)),
                 child: Mutex::new(child),
+                close_lock: Mutex::new(()),
                 exit: Mutex::new(None),
                 closed: AtomicBool::new(false),
                 output_drained: AtomicBool::new(false),
@@ -190,6 +192,7 @@ impl PtyProcess {
             Ok(Some(status)) => {
                 let normalized = normalize_status(status);
                 *cached_exit = Some(normalized.clone());
+                self.inner.closed.store(true, Ordering::Release);
                 self.inner
                     .events
                     .lock()
@@ -252,10 +255,12 @@ impl PtyProcess {
     }
 
     pub fn close(&self) -> Result<()> {
-        if self.inner.closed.swap(true, Ordering::SeqCst) {
+        let _close_guard = self.inner.close_lock.lock().expect("close lock poisoned");
+        if self.inner.closed.load(Ordering::Acquire) {
             return Ok(());
         }
         if !self.is_running() {
+            self.inner.closed.store(true, Ordering::Release);
             return Ok(());
         }
         self.inner
@@ -270,6 +275,7 @@ impl PtyProcess {
             .expect("writer lock poisoned")
             .write_all(&[0x04]);
         if self.wait_until_exit(self.inner.shutdown_timeout / 3) {
+            self.inner.closed.store(true, Ordering::Release);
             return Ok(());
         }
 
@@ -282,6 +288,7 @@ impl PtyProcess {
                 .push("SIGTERM sent".into());
             let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
             if self.wait_until_exit(self.inner.shutdown_timeout / 3) {
+                self.inner.closed.store(true, Ordering::Release);
                 return Ok(());
             }
         }
@@ -295,8 +302,15 @@ impl PtyProcess {
             .lock()
             .expect("child lock poisoned")
             .kill()?;
-        self.wait_until_exit(self.inner.shutdown_timeout / 3);
-        Ok(())
+        if self.wait_until_exit(self.inner.shutdown_timeout / 3) {
+            self.inner.closed.store(true, Ordering::Release);
+            Ok(())
+        } else {
+            Err(Error::Runner(format!(
+                "process `{}` did not exit after forced termination",
+                self.inner.command
+            )))
+        }
     }
 
     fn wait_until_exit(&self, timeout: Duration) -> bool {
@@ -325,8 +339,20 @@ fn normalize_status(status: portable_pty::ExitStatus) -> ExitStatus {
 
 impl Drop for ProcessInner {
     fn drop(&mut self) {
-        if !self.closed.load(Ordering::Relaxed) {
-            let _ = self.child.get_mut().expect("child lock poisoned").kill();
+        if self.closed.load(Ordering::Relaxed) {
+            return;
+        }
+        let child = self.child.get_mut().expect("child lock poisoned");
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        let _ = child.kill();
+        let deadline = Instant::now() + self.shutdown_timeout;
+        loop {
+            if matches!(child.try_wait(), Ok(Some(_))) || Instant::now() >= deadline {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10).min(self.shutdown_timeout));
         }
     }
 }

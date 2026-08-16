@@ -165,7 +165,9 @@ Session close is idempotent and bounded. It first requests graceful EOF, then
 sends SIGTERM, then uses the process adapter's forced kill if the child still
 runs. Process state distinguishes running, normal exit codes, and signal exits.
 Recent lifecycle events are included in timeout diagnostics. Dropping the last
-session handle also attempts cleanup.
+session handle also performs bounded termination and reaps the child.
+`startup_timeout` bounds PTY process creation; `shutdown_timeout` bounds the
+cleanup sequence.
 
 ## Security
 

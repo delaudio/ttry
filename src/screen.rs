@@ -1,7 +1,7 @@
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use vte::{Params, Perform};
 
 use crate::{Error, Result};
@@ -215,6 +215,22 @@ impl Buffer {
                 let old = self.index(col, row).unwrap();
                 let new = replacement.index(col, row).unwrap();
                 replacement.cells[new] = self.cells[old].clone();
+            }
+        }
+        for row in 0..copy_rows {
+            for col in 0..copy_cols {
+                let index = replacement.index(col, row).unwrap();
+                let valid = if replacement.cells[index].continuation {
+                    col > 0
+                        && UnicodeWidthStr::width(replacement.cells[index - 1].text.as_str()) == 2
+                } else if UnicodeWidthStr::width(replacement.cells[index].text.as_str()) == 2 {
+                    col + 1 < cols && replacement.cells[index + 1].continuation
+                } else {
+                    true
+                };
+                if !valid {
+                    replacement.cells[index] = Cell::default();
+                }
             }
         }
         replacement.cursor_col = self.cursor_col.min(cols.saturating_sub(1));
@@ -855,6 +871,15 @@ mod tests {
         terminal.advance("x界".as_bytes());
         terminal.advance(b"\r\x1b[1C\x1b[1K");
         assert_eq!(terminal.screen().fixed_text(), "    ");
+    }
+
+    #[test]
+    fn resize_clears_a_wide_character_cut_by_the_new_edge() {
+        let mut terminal = Terminal::new(4, 1).unwrap();
+        terminal.advance("x界".as_bytes());
+        terminal.screen().resize(2, 1).unwrap();
+        assert_eq!(terminal.screen().fixed_text(), "x ");
+        assert_eq!(terminal.screen().cell(1, 0).unwrap(), Cell::default());
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 
@@ -93,6 +93,13 @@ pub fn launch(command: impl Into<OsString>) -> Result<TuiSession> {
 
 impl TuiSession {
     pub fn launch(options: LaunchOptions) -> Result<Self> {
+        if options.startup_timeout.is_zero() {
+            return Err(Error::Timeout {
+                timeout: options.startup_timeout,
+                context: "starting PTY process".into(),
+            });
+        }
+        let startup_timeout = options.startup_timeout;
         let mut pty_options = PtyOptions::new(options.command);
         pty_options.args = options.args;
         pty_options.cwd = options.cwd;
@@ -101,7 +108,24 @@ impl TuiSession {
         pty_options.cols = options.cols;
         pty_options.rows = options.rows;
         pty_options.shutdown_timeout = options.shutdown_timeout;
-        let (process, mut reader) = PtyProcess::spawn(pty_options)?;
+        let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
+        thread::Builder::new()
+            .name("ttry-pty-launcher".into())
+            .spawn(move || {
+                let _ = startup_sender.send(PtyProcess::spawn(pty_options));
+            })?;
+        let (process, mut reader) = match startup_receiver.recv_timeout(startup_timeout) {
+            Ok(result) => result?,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                return Err(Error::Timeout {
+                    timeout: startup_timeout,
+                    context: "starting PTY process".into(),
+                })
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(Error::Runner("PTY launcher stopped unexpectedly".into()))
+            }
+        };
         let mut terminal = Terminal::new(options.cols, options.rows)?;
         let screen = terminal.screen();
         let thread_screen = screen.clone();
