@@ -211,8 +211,9 @@ impl TestContext {
     ///
     /// Rust test bodies cannot be forcibly stopped safely. Long-running custom
     /// work should poll this flag and return promptly when cancellation is
-    /// requested. Registered TUI sessions are closed by the runner once the
-    /// test body returns.
+    /// requested. Registered TUI sessions are closed during cancellation; if
+    /// the worker does not stop within the bounded grace period, later tests
+    /// are skipped rather than run concurrently with it.
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
@@ -251,6 +252,7 @@ fn combine_test_and_cleanup(body: Result<()>, cleanup: Result<()>) -> Result<()>
 }
 
 type TestBody = Box<dyn FnOnce(&mut TestContext) -> Result<()> + Send>;
+const WORKER_CANCELLATION_GRACE: Duration = Duration::from_millis(100);
 
 pub struct TestCase {
     name: String,
@@ -323,10 +325,11 @@ impl Runner {
     pub fn run(self, grep: Option<&str>) -> RunReport {
         let focused = self.tests.iter().any(|test| test.focus);
         let mut report = RunReport::default();
+        let mut unsafe_to_continue = false;
         for test in self.tests {
             let name = test.full_name();
             let filtered = grep.is_some_and(|pattern| !name.contains(pattern));
-            if test.skip || filtered || (focused && !test.focus) {
+            if unsafe_to_continue || test.skip || filtered || (focused && !test.focus) {
                 report.skipped += 1;
                 report.tests.push(TestResult {
                     name,
@@ -365,40 +368,63 @@ impl Runner {
                     };
                     let _ = result_sender.send(result);
                 });
-            let result = match worker {
+            let (result, can_continue) = match worker {
                 Ok(worker) => match result_receiver.recv_timeout(timeout) {
                     Ok(body_result) => {
                         let cleanup_result = cleanup_sessions(&sessions);
                         let _ = worker.join();
-                        combine_test_and_cleanup(body_result, cleanup_result)
+                        (combine_test_and_cleanup(body_result, cleanup_result), true)
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {
                         cancelled.store(true, Ordering::Release);
                         let cleanup_result = cleanup_sessions(&sessions);
-                        let diagnostic = cleanup_result
+                        let mut diagnostic = cleanup_result
                             .err()
                             .map(|error| format!("; after cancellation: {error}"))
                             .unwrap_or_default();
-                        Err(Error::Timeout {
-                            timeout,
-                            context: format!("test `{name}` exceeded its timeout{diagnostic}"),
-                        })
+                        let worker_stopped =
+                            match result_receiver.recv_timeout(WORKER_CANCELLATION_GRACE) {
+                                Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                    let _ = worker.join();
+                                    true
+                                }
+                                Err(mpsc::RecvTimeoutError::Timeout) => false,
+                            };
+                        if !worker_stopped {
+                            diagnostic.push_str(
+                                "; worker ignored cancellation; remaining tests were skipped",
+                            );
+                        }
+                        (
+                            Err(Error::Timeout {
+                                timeout,
+                                context: format!("test `{name}` exceeded its timeout{diagnostic}"),
+                            }),
+                            worker_stopped,
+                        )
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
                         let cleanup_result = cleanup_sessions(&sessions);
                         let _ = worker.join();
-                        combine_test_and_cleanup(
-                            Err(Error::Runner(format!(
-                                "worker for test `{name}` stopped unexpectedly"
-                            ))),
-                            cleanup_result,
+                        (
+                            combine_test_and_cleanup(
+                                Err(Error::Runner(format!(
+                                    "worker for test `{name}` stopped unexpectedly"
+                                ))),
+                                cleanup_result,
+                            ),
+                            true,
                         )
                     }
                 },
-                Err(error) => Err(Error::Runner(format!(
-                    "could not start worker for test `{name}`: {error}"
-                ))),
+                Err(error) => (
+                    Err(Error::Runner(format!(
+                        "could not start worker for test `{name}`: {error}"
+                    ))),
+                    true,
+                ),
             };
+            unsafe_to_continue = !can_continue;
             let duration = started.elapsed();
             match result {
                 Ok(()) => {
@@ -713,7 +739,7 @@ mod tests {
         assert!(observed.load(Ordering::Acquire));
     }
     #[test]
-    fn non_cooperative_timeout_does_not_block_the_next_test() {
+    fn non_cooperative_timeout_skips_later_tests() {
         let reached_next_test = Arc::new(AtomicBool::new(false));
         let next_test_marker = Arc::clone(&reached_next_test);
         let mut runner = Runner::new(Duration::from_millis(20));
@@ -727,10 +753,15 @@ mod tests {
         }));
         let started = Instant::now();
         let report = runner.run(None);
-        assert_eq!(report.failed, 1);
-        assert_eq!(report.passed, 1);
+        assert_eq!((report.passed, report.failed, report.skipped), (0, 1, 1));
         assert!(started.elapsed() < Duration::from_millis(500));
-        assert!(reached_next_test.load(Ordering::Acquire));
+        assert!(!reached_next_test.load(Ordering::Acquire));
+        assert!(matches!(
+            &report.tests[0].status,
+            TestStatus::Failed(message)
+                if message.contains("worker ignored cancellation")
+                    && message.contains("remaining tests were skipped")
+        ));
     }
     #[test]
     fn per_test_timeout_overrides_runner_default() {

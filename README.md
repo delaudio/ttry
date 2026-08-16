@@ -132,8 +132,9 @@ sessions are closed by the runner to unblock pending PTY operations.
 Custom long-running work must poll `TestContext::is_cancelled()` to stop
 cooperatively. Rust closures execute in isolated worker threads and cannot be
 terminated forcibly; after bounded cancellation and cleanup, an uncooperative
-worker is detached so it cannot block the remaining cases. Configured CLI tests
-use bounded PTY startup, assertion, and process-shutdown operations.
+worker causes all remaining cases to be skipped, so no later test starts while
+arbitrary timed-out code may still be running. Configured CLI tests use bounded
+PTY startup, assertion, and process-shutdown operations.
 `Runner::update_snapshots` propagates the CLI update flag without mutating the
 process environment; test bodies can derive a `SnapshotOptions` value through
 `TestContext::snapshot_options`.
