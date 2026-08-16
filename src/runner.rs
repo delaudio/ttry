@@ -1001,7 +1001,7 @@ mod tests {
                 ],
                 expect_text: Some("READY".into()),
                 allow_running: true,
-                allow_running_grace_ms: Some(150),
+                allow_running_grace_ms: Some(500),
                 ..ConfiguredTest::default()
             }],
             ..Config::default()

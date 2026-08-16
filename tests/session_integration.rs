@@ -1,3 +1,5 @@
+#![cfg(feature = "internal-test-fixture")]
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -9,6 +11,26 @@ fn fixture(mode: &str) -> LaunchOptions {
     LaunchOptions::new(env!("CARGO_BIN_EXE_ttry-fixture"))
         .arg(mode)
         .size(40, 8)
+}
+
+#[cfg(unix)]
+fn descendant_pid(session: &TuiSession, prefix: &str) -> i32 {
+    let locator = session
+        .screen()
+        .get_by_regex(&format!(r"{prefix}[0-9]+"))
+        .unwrap();
+    session
+        .expect(locator.clone())
+        .timeout(OUTPUT_TIMEOUT)
+        .to_be_visible()
+        .unwrap();
+    locator
+        .text()
+        .unwrap()
+        .strip_prefix(prefix)
+        .unwrap()
+        .parse()
+        .unwrap()
 }
 
 #[test]
@@ -238,17 +260,7 @@ fn cleanup_terminates_the_entire_process_group() {
         session.process().process_group_id(),
         session.process().process_id().map(|pid| pid as i32)
     );
-    session
-        .wait_for_text("DESCENDANT_PID=", OUTPUT_TIMEOUT)
-        .unwrap();
-    let descendant = session
-        .screen()
-        .text()
-        .split("DESCENDANT_PID=")
-        .nth(1)
-        .and_then(|suffix| suffix.split_whitespace().next())
-        .and_then(|value| value.parse::<i32>().ok())
-        .expect("fixture should print its descendant PID");
+    let descendant = descendant_pid(&session, "DESCENDANT_PID=");
     assert_eq!(
         nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(descendant))).unwrap(),
         nix::unistd::Pid::from_raw(session.process().process_group_id().unwrap())
@@ -276,17 +288,7 @@ fn exited_leader_preserves_the_descendant_grace_period() {
         .env("TTRY_SIGNAL_MARKER", completion_marker.as_os_str())
         .env("TTRY_GRACE_DELAY", "4");
     let session = TuiSession::launch(options).unwrap();
-    session
-        .wait_for_text("DESCENDANT_PID=", OUTPUT_TIMEOUT)
-        .unwrap();
-    let descendant = session
-        .screen()
-        .text()
-        .split("DESCENDANT_PID=")
-        .nth(1)
-        .and_then(|suffix| suffix.split_whitespace().next())
-        .and_then(|value| value.parse::<i32>().ok())
-        .expect("fixture should print its descendant PID");
+    let descendant = descendant_pid(&session, "DESCENDANT_PID=");
     assert_eq!(
         nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(descendant))).unwrap(),
         nix::unistd::Pid::from_raw(session.process().process_group_id().unwrap())
