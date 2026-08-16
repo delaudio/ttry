@@ -304,6 +304,29 @@ fn decode_waitid_exit(si_code: libc::c_int, status: libc::c_int) -> Result<ExitO
     )))
 }
 
+#[cfg(target_vendor = "apple")]
+fn waitid_pid(info: &libc::siginfo_t) -> libc::pid_t {
+    // Rust libc models Apple's siginfo payload with hidden union storage and
+    // exposes it through these unsafe accessors, not public struct fields.
+    // Keeping this separate makes each target compile against its own ABI.
+    unsafe { info.si_pid() }
+}
+
+#[cfg(target_vendor = "apple")]
+fn waitid_status(info: &libc::siginfo_t) -> libc::c_int {
+    unsafe { info.si_status() }
+}
+
+#[cfg(target_os = "linux")]
+fn waitid_pid(info: &libc::siginfo_t) -> libc::pid_t {
+    unsafe { info.si_pid() }
+}
+
+#[cfg(target_os = "linux")]
+fn waitid_status(info: &libc::siginfo_t) -> libc::c_int {
+    unsafe { info.si_status() }
+}
+
 #[cfg(any(target_vendor = "apple", target_os = "linux"))]
 fn observe_exit_without_reaping(pid: i32) -> Result<ExitObservation> {
     // SAFETY: waitid initializes siginfo for this child (or leaves si_pid at
@@ -341,11 +364,10 @@ fn observe_exit_without_reaping(pid: i32) -> Result<ExitObservation> {
         }
         return Err(Error::Io(error));
     }
-    // SAFETY: these accessors are valid for siginfo populated by waitid.
-    if unsafe { info.si_pid() } == 0 {
+    if waitid_pid(&info) == 0 {
         return Ok(ExitObservation::Running);
     }
-    let status = unsafe { info.si_status() };
+    let status = waitid_status(&info);
     decode_waitid_exit(info.si_code, status)
 }
 
@@ -1118,6 +1140,13 @@ mod option_tests {
 #[cfg(all(test, any(target_vendor = "apple", target_os = "linux")))]
 mod unix_tests {
     use super::*;
+
+    #[test]
+    fn target_siginfo_accessors_compile_and_read_zeroed_payload() {
+        let info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        assert_eq!(waitid_pid(&info), 0);
+        assert_eq!(waitid_status(&info), 0);
+    }
 
     #[test]
     fn unexpected_waitid_event_is_an_actionable_error() {

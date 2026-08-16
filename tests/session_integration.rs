@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ttry::{expect, LaunchOptions, ProcessState, TuiSession};
@@ -31,10 +32,19 @@ fn launches_in_pty_with_term_dimensions_and_exit() {
 
 #[test]
 fn relative_executable_resolves_once_against_relative_cwd() {
+    let fixture_binary = PathBuf::from(env!("CARGO_BIN_EXE_ttry-fixture"));
+    let fixture_directory = fixture_binary
+        .parent()
+        .expect("Cargo fixture binary should have a parent directory");
+    let relative_fixture = PathBuf::from(".").join(
+        fixture_binary
+            .file_name()
+            .expect("Cargo fixture binary should have a filename"),
+    );
     let session = TuiSession::launch(
-        LaunchOptions::new("./ttry-fixture")
+        LaunchOptions::new(relative_fixture)
             .arg("info")
-            .cwd("target/debug")
+            .cwd(fixture_directory)
             .size(40, 8),
     )
     .unwrap();
