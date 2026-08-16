@@ -109,8 +109,9 @@ Configured commands must exit successfully by default, including after a
 screen assertion. Set `allow_running = true` for an interactive TUI that
 should pass while cleanup stops it; a non-zero exit during a short bounded
 post-assertion grace window still fails. Set `expect_exit = true` to accept any exit status, or
-`expect_exit_code` to require an exact status. CLI options override
-configuration values:
+`expect_exit_code` to require an exact status. CLI options override suite-level
+configuration values; an explicit per-test `timeout_ms` remains the most
+specific timeout and takes precedence over `--timeout`:
 
 ```bash
 ttry test \

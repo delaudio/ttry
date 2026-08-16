@@ -24,6 +24,7 @@ enum Command {
         config: PathBuf,
         #[arg(long)]
         grep: Option<String>,
+        /// Override the suite default timeout; explicit per-test timeouts still take precedence.
         #[arg(long, value_name = "MILLISECONDS", value_parser = parse_positive_timeout)]
         timeout: Option<u64>,
         #[arg(long, value_parser = parse_reporter)]

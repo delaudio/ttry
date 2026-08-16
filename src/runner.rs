@@ -456,8 +456,10 @@ pub fn run_config(config: Config, options: RunOptions) -> RunReport {
     let mut runner = Runner::new(timeout).update_snapshots(options.update_snapshots);
     for configured in config.tests {
         let name = configured.name.clone();
-        let test_timeout = cli_timeout
-            .or_else(|| configured.timeout_ms.map(Duration::from_millis))
+        let test_timeout = configured
+            .timeout_ms
+            .map(Duration::from_millis)
+            .or(cli_timeout)
             .unwrap_or(timeout);
         let group = configured.group.clone();
         let skip = configured.skip;
@@ -814,6 +816,30 @@ mod tests {
         let report = runner.run(None);
         assert_eq!(report.failed, 1);
         assert!(started.elapsed() < Duration::from_millis(500));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn configured_per_test_timeout_overrides_cli_suite_timeout() {
+        let config = Config {
+            timeout_ms: 1_000,
+            tests: vec![ConfiguredTest {
+                name: "per-test timeout".into(),
+                command: "/bin/sh".into(),
+                args: vec!["-c".into(), "sleep 0.08".into()],
+                timeout_ms: Some(300),
+                ..ConfiguredTest::default()
+            }],
+            ..Config::default()
+        };
+        let report = run_config(
+            config,
+            RunOptions {
+                timeout: Some(Duration::from_millis(20)),
+                ..RunOptions::default()
+            },
+        );
+
+        assert_eq!((report.passed, report.failed), (1, 0), "{report:?}");
     }
     #[test]
     fn timeout_does_not_report_a_late_body_error() {

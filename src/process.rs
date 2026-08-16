@@ -485,6 +485,11 @@ impl PtyProcess {
                 rows: options.rows,
             });
         }
+        if options.shutdown_timeout.is_zero() {
+            return Err(Error::InvalidTimeout {
+                field: "shutdown_timeout",
+            });
+        }
         let command_display = options.command.to_string_lossy().into_owned();
         let command_path = std::path::Path::new(&options.command);
         let resolved_cwd = options
@@ -1089,6 +1094,24 @@ impl Drop for ProcessInner {
             }
             thread::sleep(Duration::from_millis(10).min(remaining));
         }
+    }
+}
+
+#[cfg(test)]
+mod option_tests {
+    use super::*;
+
+    #[test]
+    fn zero_shutdown_timeout_is_rejected_before_spawning() {
+        let mut options = PtyOptions::new("command-must-not-be-spawned");
+        options.shutdown_timeout = Duration::ZERO;
+
+        assert!(matches!(
+            PtyProcess::spawn(options),
+            Err(Error::InvalidTimeout {
+                field: "shutdown_timeout"
+            })
+        ));
     }
 }
 

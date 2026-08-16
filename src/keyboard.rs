@@ -99,12 +99,19 @@ impl Key {
             _ => return Err(Error::InvalidKey(expression.into())),
         };
         if ctrl || alt || shift {
-            Ok(Key::Modified {
+            let modified = Key::Modified {
                 ctrl,
                 alt,
                 shift,
                 key: Box::new(base),
-            })
+            };
+            match modified.encode() {
+                Err(Error::UnsupportedKey(_, reason)) => {
+                    Err(Error::UnsupportedKey(expression.into(), reason))
+                }
+                Err(error) => Err(error),
+                Ok(_) => Ok(modified),
+            }
         } else {
             Ok(base)
         }
@@ -299,5 +306,9 @@ mod tests {
         assert!(Key::parse("shift+shift+a").is_err());
         assert!(matches!(Key::parse("ctrl+"), Err(Error::InvalidKey(_))));
         assert!(matches!(Key::parse("ctrl++"), Err(Error::InvalidKey(_))));
+        assert!(matches!(
+            Key::parse("ctrl+shift+f1"),
+            Err(Error::UnsupportedKey(expression, _)) if expression == "ctrl+shift+f1"
+        ));
     }
 }
