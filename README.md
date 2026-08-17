@@ -21,6 +21,25 @@ launch → press/type/paste → query → wait → assert → snapshot → close
 Windows/ConPTY is not supported in the first release. Node.js and TypeScript
 are not required.
 
+## Installation
+
+Install the current macOS release without a Rust toolchain through the public
+Homebrew tap:
+
+```bash
+brew install delaudio/tap/ttry
+```
+
+Upgrade and uninstall use the usual Homebrew commands:
+
+```bash
+brew upgrade ttry
+brew uninstall ttry
+```
+
+Release archives for macOS and Linux are published on GitHub. See
+[`docs/HOMEBREW.md`](docs/HOMEBREW.md) for the release contract and tap setup.
+
 ## First test from a clean checkout
 
 Install Rust with [rustup](https://rustup.rs/), clone the repository, and run:
@@ -106,7 +125,9 @@ cargo run -- test
 
 The configuration contains deterministic `[[tests]]` entries. Tests run
 serially and support grouping, skip/focus, initial `cols`/`rows`, input,
-expected text, expected exit, expected exit code, and per-test timeouts.
+expected text, expected exit, expected exit code, and per-test timeouts. Use
+`input_after_expect` when input must wait until `expect_text` is visible; this
+keeps interactive startup and key-driven exit flows deterministic.
 Configured commands must exit successfully by default, including after a
 screen assertion. Set `allow_running = true` for an interactive TUI that
 must remain alive until cleanup stops it; any exit during a short bounded

@@ -1,0 +1,253 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+# Serialize all tags to preserve the release-to-tap publication order.
+concurrency:
+  group: ttry-release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  preflight-homebrew-tap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      HOMEBREW_TAP_ENABLED: ${{ vars.HOMEBREW_TAP_ENABLED }}
+    steps:
+      - name: Require a writable Homebrew tap configuration
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "$HOMEBREW_TAP_ENABLED" = "true"
+          test -n "$HOMEBREW_TAP_TOKEN"
+          GH_TOKEN="$HOMEBREW_TAP_TOKEN" \
+            gh api repos/delaudio/homebrew-tap --jq '.permissions.push' | grep -qx true
+
+  verify:
+    needs: preflight-homebrew-tap
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          components: rustfmt, clippy
+      - run: bash scripts/release-guard.sh "${GITHUB_REF_NAME:?release tag required}"
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --lib --bins
+      - run: cargo test --locked --tests --features internal-test-fixture -- --test-threads=1
+      - run: cargo test --locked --doc
+
+  build-macos:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            architecture: arm64
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            architecture: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build release archive
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          bash scripts/release-guard.sh "${GITHUB_REF_NAME:?release tag required}"
+          version="${GITHUB_REF_NAME#v}"
+          archive="ttry-${version}-macos-${ARCHITECTURE}.tar.gz"
+          stage="dist/stage-${ARCHITECTURE}"
+          mkdir -p "$stage" dist/release
+          cargo build --locked --release --target "$TARGET"
+          cp "target/$TARGET/release/ttry" "$stage/ttry"
+          tar -czf "dist/release/$archive" -C "$stage" ttry
+          checksum="$(shasum -a 256 "dist/release/$archive" | awk '{print $1}')"
+          printf '%s  %s\n' "$checksum" "$archive" > "dist/release/$archive.sha256"
+          printf '%s\n' \
+            "{\"version\":\"$version\",\"architecture\":\"$ARCHITECTURE\",\"target\":\"$TARGET\",\"commit\":\"$GITHUB_SHA\",\"workflow_run\":\"$GITHUB_RUN_ID\"}" \
+            > "dist/release/ttry-${ARCHITECTURE}-metadata.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ttry-macos-${{ matrix.architecture }}
+          path: dist/release/*
+          if-no-files-found: error
+
+  build-linux:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build Linux release archive
+        run: |
+          bash scripts/release-guard.sh "${GITHUB_REF_NAME:?release tag required}"
+          version="${GITHUB_REF_NAME#v}"
+          archive="ttry-${version}-linux-x86_64.tar.gz"
+          mkdir -p dist/stage-linux-x86_64 dist/release
+          cargo build --locked --release --target x86_64-unknown-linux-musl
+          cp target/x86_64-unknown-linux-musl/release/ttry dist/stage-linux-x86_64/ttry
+          tar -czf "dist/release/$archive" -C dist/stage-linux-x86_64 ttry
+          checksum="$(sha256sum "dist/release/$archive" | awk '{print $1}')"
+          printf '%s  %s\n' "$checksum" "$archive" > "dist/release/$archive.sha256"
+          printf '%s\n' \
+            "{\"version\":\"$version\",\"architecture\":\"x86_64\",\"target\":\"x86_64-unknown-linux-musl\",\"commit\":\"$GITHUB_SHA\",\"workflow_run\":\"$GITHUB_RUN_ID\"}" \
+            > dist/release/ttry-linux-x86_64-metadata.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ttry-linux-x86_64
+          path: dist/release/*
+          if-no-files-found: error
+
+  package-formula:
+    needs: build-macos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: ttry-macos-*
+          path: dist/release
+          merge-multiple: true
+      - name: Render checksummed Homebrew formula
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          arm64_checksum="dist/release/ttry-${version}-macos-arm64.tar.gz.sha256"
+          x86_64_checksum="dist/release/ttry-${version}-macos-x86_64.tar.gz.sha256"
+          for checksum_file in "$arm64_checksum" "$x86_64_checksum"; do
+            if [[ ! -f "$checksum_file" ]]; then
+              echo "missing required macOS checksum artifact: $checksum_file" >&2
+              exit 1
+            fi
+          done
+          arm64_sha256="$(awk '{print $1}' "$arm64_checksum")"
+          x86_64_sha256="$(awk '{print $1}' "$x86_64_checksum")"
+          bash scripts/render-homebrew-formula.sh "$version" "$arm64_sha256" "$x86_64_sha256" dist/formula/ttry.rb
+          ruby -c dist/formula/ttry.rb
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: homebrew-formula
+          path: dist/formula/ttry.rb
+          if-no-files-found: error
+
+  publish-release:
+    needs: [package-formula, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: ttry-macos-*
+          path: dist/release
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: ttry-linux-x86_64
+          path: dist/release
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: homebrew-formula
+          path: dist/release
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          overwrite_files: false
+          prerelease: true
+          files: |
+            dist/release/*.tar.gz
+            dist/release/*.sha256
+            dist/release/*-metadata.json
+            dist/release/ttry.rb
+
+  smoke-homebrew:
+    needs: publish-release
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: homebrew-formula
+          path: dist/formula
+      - name: Install and test the published release through Homebrew
+        run: |
+          set -euo pipefail
+          cleanup() {
+            brew uninstall --formula ttry/release-smoke/ttry >/dev/null 2>&1 || true
+            brew untap ttry/release-smoke >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          brew tap-new ttry/release-smoke
+          formula_dir="$(brew --repository ttry/release-smoke)/Formula"
+          cp dist/formula/ttry.rb "$formula_dir/ttry.rb"
+          brew install --formula ttry/release-smoke/ttry
+          ttry --version
+          ttry test --help >/dev/null
+          brew test --formula ttry/release-smoke/ttry
+
+  update-homebrew-tap:
+    needs: smoke-homebrew
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: homebrew-formula
+          path: dist/formula
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: delaudio/homebrew-tap
+          ref: main
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+      - name: Publish formula to delaudio/tap
+        run: |
+          mkdir -p tap/Formula
+          cp dist/formula/ttry.rb tap/Formula/ttry.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/ttry.rb
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "ttry ${GITHUB_REF_NAME#v}"
+          git push origin HEAD:main
+
+  promote-release:
+    needs: update-homebrew-tap
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Promote the verified prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --prerelease=false --latest

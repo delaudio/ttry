@@ -1,0 +1,26 @@
+class Ttry < Formula
+  desc "Playwright-style end-to-end testing for terminal user interfaces"
+  homepage "https://github.com/delaudio/ttry"
+  version "@VERSION@"
+
+  depends_on :macos
+
+  on_macos do
+    if Hardware::CPU.arm?
+      url "@BASE_URL@/ttry-#{version}-macos-arm64.tar.gz"
+      sha256 "@ARM64_SHA256@"
+    else
+      url "@BASE_URL@/ttry-#{version}-macos-x86_64.tar.gz"
+      sha256 "@X86_64_SHA256@"
+    end
+  end
+
+  def install
+    bin.install "ttry"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/ttry --version")
+    assert_match "Discover and run tests", shell_output("#{bin}/ttry test --help")
+  end
+end
