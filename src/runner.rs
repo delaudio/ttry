@@ -121,6 +121,15 @@ impl Config {
                     message: format!("expect_text for test `{}` must not be empty", test.name),
                 });
             }
+            if test.input_after_expect.is_some() && test.expect_text.is_none() {
+                return Err(Error::Config {
+                    path: path.to_path_buf(),
+                    message: format!(
+                        "input_after_expect for test `{}` requires expect_text",
+                        test.name
+                    ),
+                });
+            }
             if test.allow_running && (test.expect_exit || test.expect_exit_code.is_some()) {
                 return Err(Error::Config {
                     path: path.to_path_buf(),
@@ -176,6 +185,9 @@ pub struct ConfiguredTest {
     pub rows: Option<u16>,
     pub input: Option<String>,
     pub expect_text: Option<String>,
+    /// Input sent only after `expect_text` is visible. This is useful for
+    /// deterministic interactive flows that must not race application startup.
+    pub input_after_expect: Option<String>,
     /// Opt out of the default successful-exit assertion after screen checks.
     /// Intended for interactive TUIs that must remain alive until test
     /// cleanup. Any exit observed during the bounded grace window is rejected.
@@ -608,6 +620,9 @@ pub fn run_config(config: Config, options: RunOptions) -> RunReport {
                     };
                 }
             }
+            if let Some(input) = configured.input_after_expect {
+                session.keyboard().paste(&input)?;
+            }
             if let Some(code) = configured.expect_exit_code {
                 expect_configured_exit(
                     &session,
@@ -898,6 +913,20 @@ mod tests {
             Err(Error::Config { .. })
         ));
     }
+    #[test]
+    fn input_after_expect_requires_expected_text() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(
+            file.path(),
+            "[[tests]]\nname = 'case'\ncommand = 'app'\ninput_after_expect = 'q'\n",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            Config::load(file.path()),
+            Err(Error::Config { message, .. }) if message.contains("input_after_expect")
+        ));
+    }
     #[cfg(unix)]
     #[test]
     fn configured_dimensions_reach_the_child_environment() {
@@ -959,6 +988,30 @@ mod tests {
             ..Config::default()
         };
         let report = run_config(config, RunOptions::default());
+        assert_eq!((report.passed, report.failed), (1, 0), "{report:?}");
+    }
+    #[cfg(unix)]
+    #[test]
+    fn configured_input_after_expect_waits_for_the_startup_screen() {
+        let config = Config {
+            timeout_ms: 1_000,
+            tests: vec![ConfiguredTest {
+                name: "interactive startup handshake".into(),
+                command: "/bin/sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "printf 'READY\\r\\n'; read input; test \"$input\" = quit".into(),
+                ],
+                expect_text: Some("READY".into()),
+                input_after_expect: Some("quit\r".into()),
+                expect_exit_code: Some(0),
+                ..ConfiguredTest::default()
+            }],
+            ..Config::default()
+        };
+
+        let report = run_config(config, RunOptions::default());
+
         assert_eq!((report.passed, report.failed), (1, 0), "{report:?}");
     }
     #[cfg(unix)]
